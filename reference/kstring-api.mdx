@@ -1,0 +1,346 @@
+---
+title: "kstring: CrisOS v2 Kernel String Utilities API"
+sidebarTitle: "kstring API"
+description: "C function reference for kstring.h — the freestanding string and memory utility library used throughout the CrisOS v2 kernel in place of libc."
+---
+
+`kstring.h` provides the kernel's freestanding string and memory utilities. Because CrisOS v2 is compiled with `-nostdlib`, there is no `<string.h>` or `<stdio.h>`. All string and memory operations kernel-wide use these functions instead, ensuring no dependency on any C runtime. Include `kstring.h` in any kernel translation unit that needs string manipulation, comparison, or integer-to-string conversion.
+
+---
+
+## String Length
+
+### `kstrlen`
+
+```c
+size_t kstrlen(const char *s);
+```
+
+Returns the number of bytes in `s` before the terminating NUL character. Equivalent to libc `strlen`.
+
+<ParamField path="s" type="const char *" required>
+  NUL-terminated string to measure.
+</ParamField>
+
+**Returns:** The length of `s` in bytes, not including the NUL terminator.
+
+---
+
+## String Comparison
+
+### `kstrcmp`
+
+```c
+int kstrcmp(const char *a, const char *b);
+```
+
+Compares two NUL-terminated strings lexicographically using unsigned byte values. Equivalent to libc `strcmp`.
+
+<ParamField path="a" type="const char *" required>
+  First NUL-terminated string.
+</ParamField>
+
+<ParamField path="b" type="const char *" required>
+  Second NUL-terminated string.
+</ParamField>
+
+**Returns:** A negative integer if `a < b`, `0` if `a == b`, or a positive integer if `a > b`.
+
+---
+
+### `kstrncmp`
+
+```c
+int kstrncmp(const char *a, const char *b, size_t n);
+```
+
+Compares at most `n` bytes of two strings. Stops at the first differing byte or at a NUL terminator in either string. Equivalent to libc `strncmp`.
+
+<ParamField path="a" type="const char *" required>
+  First string.
+</ParamField>
+
+<ParamField path="b" type="const char *" required>
+  Second string.
+</ParamField>
+
+<ParamField path="n" type="size_t" required>
+  Maximum number of bytes to compare.
+</ParamField>
+
+**Returns:** A negative integer if `a < b`, `0` if equal within `n` bytes, or a positive integer if `a > b`.
+
+---
+
+## String Copy and Concatenation
+
+### `kstrcpy`
+
+```c
+char *kstrcpy(char *dest, const char *src, size_t maxlen);
+```
+
+Copies `src` into `dest`, writing at most `maxlen - 1` characters and always NUL-terminating the result. Similar to BSD `strlcpy` rather than `strcpy` — the destination is always NUL-terminated regardless of whether `src` was truncated.
+
+<ParamField path="dest" type="char *" required>
+  Destination buffer.
+</ParamField>
+
+<ParamField path="src" type="const char *" required>
+  NUL-terminated source string.
+</ParamField>
+
+<ParamField path="maxlen" type="size_t" required>
+  Total size of the destination buffer in bytes, including space for the NUL terminator. If `maxlen` is `0`, nothing is written.
+</ParamField>
+
+**Returns:** `dest`.
+
+<Note>
+  Unlike `strcpy`, `kstrcpy` will never write beyond `maxlen` bytes into `dest`. The result is always NUL-terminated when `maxlen > 0`.
+</Note>
+
+---
+
+### `kstrcat`
+
+```c
+char *kstrcat(char *dest, const char *src, size_t maxlen);
+```
+
+Appends `src` to the end of `dest`. `maxlen` is the **total size** of the destination buffer (not the number of bytes to append). The result is always NUL-terminated when `maxlen > 0` and `dest` already contains a NUL within the buffer.
+
+<ParamField path="dest" type="char *" required>
+  Destination buffer containing a NUL-terminated string to append to.
+</ParamField>
+
+<ParamField path="src" type="const char *" required>
+  NUL-terminated string to append.
+</ParamField>
+
+<ParamField path="maxlen" type="size_t" required>
+  Total capacity of the destination buffer in bytes. Appending stops before the buffer would be exceeded.
+</ParamField>
+
+**Returns:** `dest`.
+
+<Note>
+  `maxlen` is the full buffer size, not the remaining free space. This differs from libc `strncat`, where the third argument is the maximum number of bytes to append.
+</Note>
+
+---
+
+## String Search
+
+### `kstrstr`
+
+```c
+const char *kstrstr(const char *haystack, const char *needle);
+```
+
+Finds the first occurrence of the substring `needle` within `haystack`. Equivalent to libc `strstr`.
+
+<ParamField path="haystack" type="const char *" required>
+  NUL-terminated string to search within.
+</ParamField>
+
+<ParamField path="needle" type="const char *" required>
+  NUL-terminated substring to find. If empty, `haystack` is returned immediately.
+</ParamField>
+
+**Returns:** A pointer to the first occurrence of `needle` in `haystack`; `NULL` if not found.
+
+---
+
+### `kstrchr`
+
+```c
+const char *kstrchr(const char *s, char c);
+```
+
+Finds the first occurrence of character `c` in `s`. Equivalent to libc `strchr`. Does not search past the NUL terminator.
+
+<ParamField path="s" type="const char *" required>
+  NUL-terminated string to search.
+</ParamField>
+
+<ParamField path="c" type="char" required>
+  Character to search for.
+</ParamField>
+
+**Returns:** A pointer to the first occurrence of `c` in `s`; `NULL` if not found.
+
+---
+
+## Memory Operations
+
+### `kmemset`
+
+```c
+void *kmemset(void *s, int c, size_t n);
+```
+
+Fills the first `n` bytes of `s` with the byte value `(unsigned char)c`. Equivalent to libc `memset`.
+
+<ParamField path="s" type="void *" required>
+  Pointer to the memory region to fill.
+</ParamField>
+
+<ParamField path="c" type="int" required>
+  Byte value to fill with (only the low 8 bits are used).
+</ParamField>
+
+<ParamField path="n" type="size_t" required>
+  Number of bytes to fill.
+</ParamField>
+
+**Returns:** `s`.
+
+---
+
+### `kmemcpy`
+
+```c
+void *kmemcpy(void *dest, const void *src, size_t n);
+```
+
+Copies `n` bytes from `src` to `dest`. The regions must not overlap. Equivalent to libc `memcpy`.
+
+<ParamField path="dest" type="void *" required>
+  Destination memory region.
+</ParamField>
+
+<ParamField path="src" type="const void *" required>
+  Source memory region. Must not overlap with `dest`.
+</ParamField>
+
+<ParamField path="n" type="size_t" required>
+  Number of bytes to copy.
+</ParamField>
+
+**Returns:** `dest`.
+
+---
+
+### `kmemcmp`
+
+```c
+int kmemcmp(const void *a, const void *b, size_t n);
+```
+
+Compares the first `n` bytes of two memory regions using unsigned byte values. Equivalent to libc `memcmp`.
+
+<ParamField path="a" type="const void *" required>
+  First memory region.
+</ParamField>
+
+<ParamField path="b" type="const void *" required>
+  Second memory region.
+</ParamField>
+
+<ParamField path="n" type="size_t" required>
+  Number of bytes to compare.
+</ParamField>
+
+**Returns:** A negative integer if `a < b`, `0` if both regions are identical, or a positive integer if `a > b`.
+
+---
+
+## Integer Conversion
+
+### `kitoa`
+
+```c
+void kitoa(long value, char *buf, size_t maxlen);
+```
+
+Converts the signed long integer `value` to its decimal string representation and writes it into `buf`. Negative values are prefixed with `'-'`. The result is always NUL-terminated when `maxlen > 0`. There is no direct libc equivalent; the closest standard function is `snprintf(buf, maxlen, "%ld", value)`.
+
+<ParamField path="value" type="long" required>
+  The signed integer to convert.
+</ParamField>
+
+<ParamField path="buf" type="char *" required>
+  Output buffer to write the decimal string into.
+</ParamField>
+
+<ParamField path="maxlen" type="size_t" required>
+  Total capacity of `buf` in bytes. The output is silently truncated if `maxlen` is too small. If `maxlen` is `0`, nothing is written.
+</ParamField>
+
+**Returns:** Nothing (`void`).
+
+---
+
+## Inline Helpers
+
+These functions are defined as `static inline` in `kstring.h` and generate no separate object code.
+
+### `kskip_spaces`
+
+```c
+static inline const char *kskip_spaces(const char *s);
+```
+
+Advances `s` past any leading whitespace characters: space (`' '`), horizontal tab (`'\t'`), carriage return (`'\r'`), and newline (`'\n'`).
+
+<ParamField path="s" type="const char *" required>
+  Pointer into a string, positioned at or before the first non-whitespace character.
+</ParamField>
+
+**Returns:** A pointer to the first character in `s` that is not a whitespace character; or a pointer to the NUL terminator if `s` is entirely whitespace.
+
+---
+
+### `kstreq`
+
+```c
+static inline int kstreq(const char *a, const char *b);
+```
+
+Tests two NUL-terminated strings for equality. This is a convenience wrapper; unlike `kstrcmp`, which returns `0` for equal strings, `kstreq` returns `1` for equal strings and `0` for unequal — matching a boolean convention and avoiding the inverted-zero check.
+
+<ParamField path="a" type="const char *" required>
+  First NUL-terminated string.
+</ParamField>
+
+<ParamField path="b" type="const char *" required>
+  Second NUL-terminated string.
+</ParamField>
+
+**Returns:** `1` if `a` and `b` are identical; `0` otherwise.
+
+<Note>
+  `kstreq` returns `1` for equality, which is the **opposite sign convention** from `kstrcmp`. Use `kstreq` when you want a boolean result and `kstrcmp` when you need ordering information.
+</Note>
+
+---
+
+## Usage Examples
+
+```c
+#include "kstring.h"
+#include "console.h"
+
+/* Convert an integer result to a string and print it */
+char buf[32];
+kitoa(sum, buf, sizeof(buf));
+console_print(buf);
+
+/* Boolean string comparison in a command dispatcher */
+if (kstreq(cmd, "help")) {
+    /* handle help command */
+}
+
+/* Strip leading whitespace from shell input */
+const char *p = kskip_spaces(input);
+
+/* Safe bounded copy into a fixed-size kernel buffer */
+char name[VFS_NAME_SIZE];
+kstrcpy(name, user_input, sizeof(name));
+
+/* Append a suffix with overflow protection */
+char path[128];
+kstrcpy(path, "/home/", sizeof(path));
+kstrcat(path, username, sizeof(path));
+```

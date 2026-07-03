@@ -1,0 +1,200 @@
+---
+title: "CrisOS v2 Service Manager: Init-Style Unit File System"
+sidebarTitle: "Service Manager"
+description: "How CrisOS v2's systemd-like service manager parses unit files from the VFS, tracks service state, and handles systemctl commands."
+---
+
+CrisOS v2 includes a lightweight service manager inspired by systemd. At boot, `systemd_init()` scans every file in the CRFS image whose path begins with `systemd/`, parses any that end in `.service`, and registers them in a static table of up to `MAX_UNITS = 16` service units. After loading, it automatically activates every unit whose `WantedBy` field equals `default.target`. The shell then exposes the service table through the `systemctl` command, which delegates to `systemd_handle_command()`.
+
+---
+
+## Unit File Format
+
+Unit files follow a subset of the INI-like systemd format. The parser recognizes three sections — `[Unit]`, `[Service]`, and `[Install]` — and three key-value fields. Section headers are detected by checking if a line starts with `[`; they are skipped without further processing. Key-value lines are matched by prefix.
+
+### Example — `rootfs/systemd/hello.service`
+
+```ini
+[Unit]
+Description=Hello service for CrisOS
+WantedBy=default.target
+
+[Service]
+ExecStart=echo Hello from systemd service
+```
+
+### Supported Fields
+
+| Section | Key | Max length | Description |
+|---|---|---|---|
+| `[Unit]` | `Description=` | 64 bytes | Human-readable unit description |
+| `[Service]` | `ExecStart=` | 128 bytes | Command string (recorded, not executed) |
+| `[Install]` | `WantedBy=` | 64 bytes | Target that triggers auto-start at boot |
+
+Lines that are empty (after trimming whitespace) or start with `[` are silently skipped. There is no support for comments (`#`), multi-line values, or section-qualified key lookups — the parser simply matches whichever key appears first anywhere in the file.
+
+---
+
+## Service Unit Structure
+
+Each loaded unit is stored in an `sd_unit_t` struct:
+
+```c
+#define MAX_UNITS      16
+#define MAX_UNIT_NAME  32
+#define MAX_UNIT_DESC  64
+#define MAX_UNIT_CMD  128
+#define MAX_UNIT_WANTED 64
+
+struct sd_unit {
+    char name[MAX_UNIT_NAME];          /* basename of the .service file          */
+    char description[MAX_UNIT_DESC];   /* from Description=                      */
+    char exec_start[MAX_UNIT_CMD];     /* from ExecStart=                        */
+    char wanted_by[MAX_UNIT_WANTED];   /* from WantedBy=                         */
+    bool active;                       /* runtime on/off flag                    */
+};
+```
+
+The `name` field is the basename extracted from the CRFS file path (e.g. `"hello.service"`). All string fields are copied with a null-safe `sd_strncpy()` that always writes a terminating `'\0'`.
+
+---
+
+## Initialization — `systemd_init()`
+
+```c
+bool systemd_init(void)
+```
+
+<Steps>
+  <Step title="Reset unit table">
+    `unit_count` is set to `0`. The existing `units[]` array is reused; no dynamic allocation is performed.
+  </Step>
+  <Step title="Scan the CRFS image">
+    `systemd_init()` calls `fs_file_count()` and iterates every entry with `fs_file_at(i)`. For each file whose `name` begins with `"systemd/"`, it calls the internal `sd_parse_unit()` function.
+  </Step>
+  <Step title="Filter by extension">
+    `sd_parse_unit()` extracts the basename using `sd_get_basename()` and checks whether the extension portion starts with `".service"`. Files that do not match are skipped.
+  </Step>
+  <Step title="Parse key-value pairs">
+    The file content is read line by line. Each line is trimmed of leading and trailing whitespace. Lines starting with `[` (section headers) and empty lines are skipped. The remaining lines are matched against the three supported prefixes using `sd_starts_with()`:
+    - `"Description="` → `unit->description`
+    - `"ExecStart="` → `unit->exec_start`
+    - `"WantedBy="` → `unit->wanted_by`
+  </Step>
+  <Step title="Auto-start default target">
+    After all units are registered, `sd_start_default_target()` iterates the table and calls `sd_start_unit()` on every unit whose `wanted_by` field begins with `"default.target"`. This sets `unit->active = true` and prints a startup message to the console.
+  </Step>
+</Steps>
+
+---
+
+## `systemctl` Commands
+
+The shell passes everything after the `systemctl` token to `systemd_handle_command(rest)`. The function splits `rest` into a sub-command and an optional unit name.
+
+<Accordion title="systemctl list-units">
+  Prints every registered unit with its current active/inactive state.
+
+  ```
+  > systemctl list-units
+  hello.service [active]
+  ```
+
+  Internally calls `sd_print_unit()` for each entry in `units[0..unit_count)`.
+</Accordion>
+
+<Accordion title="systemctl status <unit>">
+  Prints the unit name, active state, description, and `ExecStart` command.
+
+  ```
+  > systemctl status hello.service
+  hello.service [active]
+  Description: Hello service for CrisOS
+  ExecStart: echo Hello from systemd service
+  ```
+</Accordion>
+
+<Accordion title="systemctl start <unit>">
+  Sets `unit->active = true`. If the unit is already active, prints `"Unit already active."` If the unit has a non-empty `ExecStart`, it is printed to the console — but **not executed**.
+
+  ```
+  > systemctl start hello.service
+  Starting hello.service
+  ExecStart: echo Hello from systemd service
+  ```
+</Accordion>
+
+<Accordion title="systemctl stop <unit>">
+  Sets `unit->active = false`. If the unit is already inactive, prints `"Unit not active."`
+
+  ```
+  > systemctl stop hello.service
+  Stopped hello.service
+  ```
+</Accordion>
+
+<Accordion title="systemctl help">
+  Calling `systemctl` with no arguments or with `help` prints the available sub-commands:
+
+  ```
+  systemctl commands:
+    systemctl list-units
+    systemctl status <unit>
+    systemctl start <unit>
+    systemctl stop <unit>
+  ```
+</Accordion>
+
+---
+
+## Example Shell Session
+
+```
+> systemctl list-units
+hello.service [active]
+
+> systemctl status hello.service
+hello.service [active]
+Description: Hello service for CrisOS
+ExecStart: echo Hello from systemd service
+
+> systemctl stop hello.service
+Stopped hello.service
+
+> systemctl list-units
+hello.service [inactive]
+
+> systemctl start hello.service
+Starting hello.service
+ExecStart: echo Hello from systemd service
+
+> systemctl status hello.service
+hello.service [active]
+Description: Hello service for CrisOS
+ExecStart: echo Hello from systemd service
+```
+
+---
+
+## Adding a Custom Service
+
+To add a service to the rootfs, create a file under `rootfs/systemd/` with a `.service` extension, rebuild the CRFS image with `tools/build_rootfs.py`, and reboot.
+
+```ini
+[Unit]
+Description=My custom CrisOS service
+WantedBy=default.target
+
+[Service]
+ExecStart=/bin/myapp --flag
+```
+
+```bash
+python3 tools/build_rootfs.py rootfs/ build/rootfs.crfs
+```
+
+The new unit will appear in `systemctl list-units` after the next boot and will be auto-started if `WantedBy=default.target` is set.
+
+<Note>
+Services are not real processes. CrisOS v2 has no scheduler and no process isolation — `active` is a boolean flag stored in a static C struct. The `ExecStart` string is parsed and displayed but never passed to any execution engine. `systemctl enable` is not implemented; the equivalent is setting `WantedBy=default.target` in the unit file.
+</Note>

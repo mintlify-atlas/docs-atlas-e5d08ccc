@@ -1,0 +1,75 @@
+---
+title: "CrisOS v2: Modular Experimental OS for i386"
+sidebarTitle: "Introduction"
+description: "CrisOS v2 is a freestanding 32-bit OS for i386 built in C and Assembly. Learn what it is, what it includes, and how its kernel subsystems fit together."
+---
+
+CrisOS v2 is a modular, experimental 32-bit operating system targeting the **i386** architecture, written in C and Assembly. It runs without any dependency on the C standard library (`libc`), boots through a GRUB-compliant Multiboot header, and organizes its functionality into discrete, independently maintainable kernel subsystems — from memory layout and interrupt handling to a virtual filesystem, interactive shell, and lightweight service manager.
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Freestanding Kernel" icon="microchip">
+    The kernel compiles with `-ffreestanding -nostdlib`, requiring no host OS runtime. It runs directly on bare i386 hardware or in QEMU, entering protected mode via a Multiboot-compliant GRUB bootloader.
+  </Card>
+  <Card title="VFS and CRFS Filesystem" icon="folder-tree">
+    A Virtual File System (VFS) layer sits on top of the custom CRFS binary image. CRFS is a flat, header-indexed filesystem packed by `tools/build_rootfs.py` and loaded at boot as a Multiboot module.
+  </Card>
+  <Card title="Interactive Shell" icon="terminal">
+    A built-in text-mode shell supports over 25 commands including `ls`, `cat`, `grep`, `cp`, `mv`, `touch`, `mkdir`, `echo`, `stat`, `df`, `uname`, `whoami`, `reboot`, and more — all implemented without libc.
+  </Card>
+  <Card title="Service Manager" icon="gear">
+    A minimal init-style service manager (`systemd.c`) is initialized during boot and controllable via the `systemctl` shell command, mirroring the structure of a Linux-like service lifecycle.
+  </Card>
+  <Card title="LCP Package Manager" icon="box">
+    The LCP (Linux-Compatible Package) manager provides in-kernel package management via `lcp_handle_command`, backed by a JSON repository (`lcp_main_repo.json`) and a full-featured host-side CLI in `tools/lcp.py`.
+  </Card>
+  <Card title="PS/2 Keyboard and Mouse Drivers" icon="keyboard">
+    Hardware drivers handle PS/2 keyboard input — including interrupt-driven key scanning and support for US, Spanish, and German layouts — and PS/2 mouse state tracking via IRQ12.
+  </Card>
+  <Card title="Assembly Arithmetic" icon="calculator">
+    Four arithmetic routines (`add_asm`, `sub_asm`, `mul_asm`, `div_asm`) are implemented in x86 Assembly in `asm_utils.S` and `math_asm.S`, callable directly from C shell commands via `asm add|sub|mul|div <a> <b>`.
+  </Card>
+  <Card title="VGA Text-Mode GUI" icon="display">
+    A lightweight graphical interface (`gui.c`) renders bordered windows and menus directly into VGA memory at `0xB8000` using `console_putxy`, providing a keyboard-navigable menu for filesystem browsing and system status.
+  </Card>
+</CardGroup>
+
+## Architecture Overview
+
+CrisOS v2 follows a linear boot-to-shell flow. Each stage initializes the next in a fixed order within `kmain`, starting from the hardware abstraction layers and ending in the interactive shell loop.
+
+```text
+boot.S  (Multiboot header, stack setup, call kmain)
+  └─▶ kmain() in kernel.c
+        ├─ console_clear()           # VGA text output
+        ├─ gdt_init()                # Global Descriptor Table
+        ├─ idt_init()                # Interrupt Descriptor Table
+        ├─ pic_init()                # Programmable Interrupt Controller (IRQs 0–15)
+        ├─ timer_init(100)           # PIT at 100 Hz
+        ├─ keyboard_init()           # PS/2 keyboard driver
+        ├─ mouse_init()              # PS/2 mouse driver
+        ├─ fs_init() + vfs_init()    # Mount CRFS rootfs via Multiboot module
+        ├─ boot_init()               # Boot manager
+        ├─ systemd_init()            # Service manager
+        ├─ lcp_init()                # Package manager
+        └─ shell_run()               # Interactive shell (blocks forever)
+```
+
+Drivers (`drivers/`) are compiled separately and accessed through their headers in `src/`. The VFS provides an abstraction over the raw CRFS image so the shell and other subsystems operate on named files and directories without knowing the underlying binary format.
+
+## Requirements
+
+To build and run CrisOS v2 you need the following tools installed on your host system:
+
+| Tool | Purpose |
+|---|---|
+| `gcc` or `i686-elf-gcc` | C compiler targeting i386 (cross-compiler recommended) |
+| `make` | Build orchestration |
+| `qemu-system-i386` | Hardware emulation for running the OS |
+| `grub-mkrescue` | Generates a bootable ISO from the `iso/` tree |
+| Python 3 | Runs `tools/build_rootfs.py` to pack the CRFS image |
+
+<Note>
+  CrisOS v2 is an **experimental and educational** project. It is not production-grade software. Features such as memory protection, multi-tasking, and network I/O are absent by design. The project exists to demonstrate how a minimal freestanding kernel can be built from first principles on the i386 architecture.
+</Note>

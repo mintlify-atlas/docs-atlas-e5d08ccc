@@ -1,0 +1,358 @@
+---
+title: "VFS and FS API Reference for CrisOS v2"
+sidebarTitle: "VFS API"
+description: "C function reference for the CrisOS v2 virtual file system (vfs.h) and raw CRFS filesystem layer (fs.h), including signatures, parameters, and return values."
+---
+
+The CrisOS v2 file system API spans two layers. The `fs.h` layer provides raw access to the CRFS binary image — it parses the on-disk format and exposes a flat table of named files. The `vfs.h` layer wraps `fs.h` with a navigable in-memory node tree that supports the full file and directory interface used by the shell, including path resolution, writable files, and dynamic directory creation.
+
+---
+
+## `fs.h` — Raw CRFS Layer
+
+The `fs.h` layer operates directly on a CRFS binary image loaded into memory. A CRFS image begins with a 16-byte header (magic `CRFS`, version `1`, file count) followed by a flat entry table of 72-byte records. `fs_init` must be called once before any other `fs_*` function.
+
+### Data Structure
+
+```c
+struct fs_file {
+    const char *name;
+    const void *data;
+    size_t size;
+};
+```
+
+`struct fs_file` is a lightweight view into the image — `name` points into the entry table and `data` points into the raw image buffer. Neither field is heap-allocated; the image must remain valid for the lifetime of the filesystem.
+
+---
+
+### `fs_init`
+
+```c
+int fs_init(const void *image, size_t size);
+```
+
+Parses the CRFS binary image at `image` of `size` bytes. Validates the four-byte `CRFS` magic, checks the version field, and verifies that every file entry's data region falls within the image bounds. Must be called before any other `fs_*` function.
+
+<ParamField path="image" type="const void *" required>
+  Pointer to the start of the CRFS binary image in memory.
+</ParamField>
+
+<ParamField path="size" type="size_t" required>
+  Total size of the image buffer in bytes.
+</ParamField>
+
+**Returns:** `1` on success; `0` if `image` is NULL, the buffer is too small, the magic bytes are not `CRFS`, the version is not `1`, or any file entry's data region extends beyond the image bounds.
+
+---
+
+### `fs_find`
+
+```c
+const struct fs_file *fs_find(const char *name);
+```
+
+Searches the flat file table for an entry whose name matches `name` exactly (case-sensitive). Uses `kstrcmp` for comparison.
+
+<ParamField path="name" type="const char *" required>
+  Exact file name to search for, including any path separators (e.g. `"boot/kernel.bin"`).
+</ParamField>
+
+**Returns:** A pointer to a static `struct fs_file` populated with the matching entry's name, data pointer, and size; or `NULL` if no match is found.
+
+---
+
+### `fs_file_at`
+
+```c
+const struct fs_file *fs_file_at(size_t index);
+```
+
+Returns the file at position `index` in the flat file table. Useful for iterating all files in the image without knowing their names.
+
+<ParamField path="index" type="size_t" required>
+  Zero-based index into the file table. Valid range: `0` to `fs_file_count() - 1`.
+</ParamField>
+
+**Returns:** A pointer to a static `struct fs_file`; or `NULL` if `index` is out of range.
+
+<Note>
+  The returned pointer refers to a single static `struct fs_file` that is overwritten on each call. Copy the fields if you need to hold multiple results simultaneously.
+</Note>
+
+---
+
+### `fs_file_count`
+
+```c
+size_t fs_file_count(void);
+```
+
+Returns the number of files recorded in the mounted CRFS image. This value is read directly from the image header after `fs_init` succeeds.
+
+**Returns:** The number of file entries; `0` if `fs_init` has not been called successfully.
+
+---
+
+## `vfs.h` — Virtual File System Layer
+
+The VFS layer builds an in-memory node tree from the CRFS entries exposed by `fs.h`. Nodes are stored in a fixed-size static array; directories hold up to `VFS_CHILDREN_MAX` children. `vfs_init` must be called (after `fs_init`) before any other `vfs_*` function.
+
+<Warning>
+  The VFS operates within fixed compile-time limits. Exceeding these silently fails — check return values on every call.
+
+  | Constant             | Value  | Meaning                                    |
+  |----------------------|--------|--------------------------------------------|
+  | `VFS_MAX_NODES`      | `80`   | Maximum total nodes (files + directories)  |
+  | `VFS_CHILDREN_MAX`   | `16`   | Maximum children per directory node        |
+  | `VFS_NAME_SIZE`      | `64`   | Maximum bytes in a single node name        |
+  | `VFS_DATA_STORE_SIZE`| `16384`| Total writable data capacity in bytes      |
+</Warning>
+
+---
+
+### `vfs_init`
+
+```c
+int vfs_init(void);
+```
+
+Initialises the node pool and builds the in-memory tree from all files currently registered in the `fs` layer. The root node `"/"` is created as a read-only directory. Each CRFS file path is walked component-by-component; intermediate directory nodes are created automatically.
+
+**Returns:** `1` on success.
+
+---
+
+### `vfs_pwd`
+
+```c
+const char *vfs_pwd(void);
+```
+
+Returns the absolute path of the current working directory as a NUL-terminated string.
+
+**Returns:** A pointer to a static 256-byte buffer containing the current working directory path (e.g. `"/home/user"`). The buffer is overwritten on each call.
+
+---
+
+### `vfs_cd`
+
+```c
+int vfs_cd(const char *path);
+```
+
+Changes the current working directory to `path`. Accepts both absolute paths (starting with `/`) and relative paths. The special components `.` (current) and `..` (parent) are resolved correctly.
+
+<ParamField path="path" type="const char *" required>
+  Target directory path, absolute or relative.
+</ParamField>
+
+**Returns:** `1` on success; `0` if the path does not resolve to a valid directory node.
+
+---
+
+### `vfs_list`
+
+```c
+int vfs_list(const char *path);
+```
+
+Prints the contents of a directory to the console. Each child is printed on its own line; directory children are prefixed with `"/ "` and file children are prefixed with two spaces.
+
+<ParamField path="path" type="const char *" required>
+  Path to the directory to list. Pass `NULL` or an empty string to list the current working directory.
+</ParamField>
+
+**Returns:** `1` on success; `0` if the path does not resolve to a directory node.
+
+---
+
+### `vfs_cat`
+
+```c
+int vfs_cat(const char *path);
+```
+
+Prints the contents of a file to the console, byte by byte. NUL bytes in the data are printed as newlines.
+
+<ParamField path="path" type="const char *" required>
+  Path to the file whose contents should be printed.
+</ParamField>
+
+**Returns:** `1` on success; `0` if the path does not exist or resolves to a directory node.
+
+---
+
+### `vfs_mkdir`
+
+```c
+int vfs_mkdir(const char *path);
+```
+
+Creates a new writable directory node at `path`. All intermediate path components must already exist.
+
+<ParamField path="path" type="const char *" required>
+  Path for the new directory. The parent directory must already exist.
+</ParamField>
+
+**Returns:** `1` on success; `0` if the parent does not exist, the name already exists, or the node pool is full.
+
+---
+
+### `vfs_touch`
+
+```c
+int vfs_touch(const char *path);
+```
+
+Creates an empty file node at `path`. If the node already exists, the call succeeds without modifying it.
+
+<ParamField path="path" type="const char *" required>
+  Path for the new file. The parent directory must already exist.
+</ParamField>
+
+**Returns:** `1` on success; `0` if the parent does not exist or the node pool is full.
+
+---
+
+### `vfs_remove`
+
+```c
+int vfs_remove(const char *path);
+```
+
+Removes a file node from the tree. Read-only files (those loaded from the CRFS image) cannot be removed.
+
+<ParamField path="path" type="const char *" required>
+  Path to the file to remove.
+</ParamField>
+
+**Returns:** `1` on success; `0` if the path does not exist, resolves to a directory, or the node is marked read-only.
+
+---
+
+### `vfs_rmdir`
+
+```c
+int vfs_rmdir(const char *path);
+```
+
+Removes an empty directory node. The directory must contain no children. Read-only directories (those synthesised from the CRFS image) cannot be removed.
+
+<ParamField path="path" type="const char *" required>
+  Path to the directory to remove.
+</ParamField>
+
+**Returns:** `1` on success; `0` if the path does not exist, is not a directory, is not empty, or is read-only.
+
+---
+
+### `vfs_cp`
+
+```c
+int vfs_cp(const char *src, const char *dst);
+```
+
+Copies a file node from `src` to `dst`. The file data is duplicated into the VFS data store. The destination must not already exist, and its parent directory must exist.
+
+<ParamField path="src" type="const char *" required>
+  Path to the source file.
+</ParamField>
+
+<ParamField path="dst" type="const char *" required>
+  Path for the destination file. Must not already exist.
+</ParamField>
+
+**Returns:** `1` on success; `0` if `src` does not exist, is a directory, `dst` already exists, the parent of `dst` does not exist, or the data store is full.
+
+---
+
+### `vfs_mv`
+
+```c
+int vfs_mv(const char *src, const char *dst);
+```
+
+Moves or renames a node. The node is unlinked from its current parent and relinked under the destination parent with the destination name. Read-only nodes cannot be moved. No data is copied — only the node's name and parent linkage change.
+
+<ParamField path="src" type="const char *" required>
+  Path to the source node.
+</ParamField>
+
+<ParamField path="dst" type="const char *" required>
+  Destination path. The destination name must not already exist under the destination parent.
+</ParamField>
+
+**Returns:** `1` on success; `0` if `src` does not exist, is read-only, the destination parent does not exist, or the destination name is already taken.
+
+---
+
+### `vfs_write`
+
+```c
+int vfs_write(const char *path, const char *content, size_t length);
+```
+
+Writes `length` bytes from `content` into the file at `path`. If the file does not exist it is created. If it already exists its data pointer and size are replaced; the old data remains in the data store and is not reclaimed.
+
+<ParamField path="path" type="const char *" required>
+  Path to the target file. Created if it does not exist.
+</ParamField>
+
+<ParamField path="content" type="const char *" required>
+  Pointer to the data to write.
+</ParamField>
+
+<ParamField path="length" type="size_t" required>
+  Number of bytes from `content` to write.
+</ParamField>
+
+**Returns:** `1` on success; `0` if the path resolves to a directory, the file could not be created, or the data store is full.
+
+---
+
+### `vfs_read`
+
+```c
+const void *vfs_read(const char *path);
+```
+
+Returns a pointer to the raw data of the file at `path`. No copy is made; the pointer refers directly to either the CRFS image buffer or the VFS data store.
+
+<ParamField path="path" type="const char *" required>
+  Path to the file to read.
+</ParamField>
+
+**Returns:** A `const void *` pointer to the file's data; `NULL` if the path does not exist or resolves to a directory.
+
+---
+
+### `vfs_get_size`
+
+```c
+size_t vfs_get_size(const char *path);
+```
+
+Returns the size of the file at `path` in bytes.
+
+<ParamField path="path" type="const char *" required>
+  Path to the file.
+</ParamField>
+
+**Returns:** The file size in bytes; `0` if the path does not exist or resolves to a directory.
+
+---
+
+### `vfs_exists`
+
+```c
+int vfs_exists(const char *path);
+```
+
+Tests whether any node (file or directory) exists at `path`.
+
+<ParamField path="path" type="const char *" required>
+  Path to test.
+</ParamField>
+
+**Returns:** `1` if a node exists at `path`; `0` otherwise.

@@ -1,0 +1,118 @@
+{
+  "projectType": "general",
+  "projectName": "CrisOS v2",
+  "projectDescription": "An experimental modular 32-bit operating system for the i386 architecture, written in C and Assembly, featuring a Multiboot-compliant kernel, VFS, interactive shell, service manager, and a built-in package manager.",
+  "theme": "aspen",
+  "primaryColor": "#4A90D9",
+  "lightColor": "#6BAEEC",
+  "darkColor": "#1E3A5F",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "project-structure"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/boot-process",
+              "architecture/kernel",
+              "architecture/memory",
+              "architecture/interrupts"
+            ]
+          },
+          {
+            "group": "Subsystems",
+            "pages": [
+              "subsystems/vfs",
+              "subsystems/shell",
+              "subsystems/service-manager",
+              "subsystems/drivers"
+            ]
+          },
+          {
+            "group": "Tools",
+            "pages": [
+              "tools/lcp-package-manager",
+              "tools/build-rootfs",
+              "tools/gui"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "development/building",
+              "development/running-in-qemu",
+              "development/contributing"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "Shell Commands",
+            "pages": [
+              "reference/shell-commands",
+              "reference/lcp-commands"
+            ]
+          },
+          {
+            "group": "Kernel API",
+            "pages": [
+              "reference/vfs-api",
+              "reference/kstring-api",
+              "reference/asm-api",
+              "reference/memory-api"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Multiboot-compliant freestanding 32-bit kernel (i386)",
+    "Virtual File System (VFS) with custom CRFS rootfs format",
+    "Interactive text shell with Linux-like commands",
+    "GDT and IDT initialization for protected mode",
+    "PS/2 keyboard and mouse drivers with interrupt support",
+    "PIT timer at 100 Hz",
+    "Init-style service manager (systemd-like) reading unit files",
+    "LCP package manager (in-kernel and host-side Python tool)",
+    "Assembly-backed arithmetic operations (add, sub, mul, div)",
+    "Expression calculator (calc command)",
+    "VGA text-mode GUI overlay",
+    "Bump allocator (kmalloc/kfree)",
+    "Build toolchain with GRUB bootloader and QEMU emulation support",
+    "Multi-layout PS/2 keyboard support (US, ES, DE)"
+  ],
+  "publicApiSurface": [
+    "kmain(unsigned long mbi_addr)",
+    "vfs_init() / vfs_cd() / vfs_list() / vfs_cat() / vfs_mkdir() / vfs_touch() / vfs_remove() / vfs_rmdir() / vfs_cp() / vfs_mv() / vfs_write() / vfs_read() / vfs_get_size() / vfs_exists() / vfs_pwd()",
+    "fs_init(const void *image, size_t size) / fs_find() / fs_file_at() / fs_file_count()",
+    "shell_run()",
+    "gdt_init() / idt_init()",
+    "pic_init() / pic_mask()",
+    "timer_init(int hz)",
+    "keyboard_init() / keyboard_readline() / keyboard_read_char() / keyboard_get_layout() / keyboard_set_layout()",
+    "mouse_init() / mouse_get_state()",
+    "lcp_init() / lcp_handle_command(const char *args)",
+    "systemd_init() / systemd_handle_command(const char *args)",
+    "boot_init() / boot_handle_command(const char *args)",
+    "gui_show()",
+    "calc_eval(const char *s)",
+    "add_asm() / sub_asm() / mul_asm() / div_asm() / halt_cpu() / reboot_cpu() / inb() / outb() / console_putxy() / memsetw_asm()",
+    "kmalloc(size_t) / kfree(void *)",
+    "kstrlen() / kstrcmp() / kstrncmp() / kstrcpy() / kstrcat() / kstrstr() / kstrchr() / kmemset() / kmemcpy() / kmemcmp() / kitoa() / kskip_spaces() / kstreq()",
+    "kernel_panic(const char *message)",
+    "lcp CLI tool: search / info / install / remove / update / upgrade / list / clean / files / depends / verify / repo"
+  ]
+}

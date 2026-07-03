@@ -1,0 +1,196 @@
+---
+title: "CrisOS v2 Interactive Shell: Architecture and Command Dispatch"
+sidebarTitle: "Shell"
+description: "How the CrisOS v2 shell loop reads input, tokenizes commands, dispatches to subsystems, and supports output redirection via echo."
+---
+
+`shell_run()` is the top-level REPL that runs after all kernel subsystems have been initialized. It prints a `> ` prompt, reads a line from the PS/2 keyboard via `keyboard_readline()`, tokenizes the result into up to three discrete tokens plus a trailing "rest" buffer, and dispatches to the appropriate handler — either a built-in file operation, a system call, or a delegated subsystem command. The shell never returns; it loops indefinitely on an unconditional `while (1)`.
+
+## Shell Loop
+
+The main loop body follows this sequence on every iteration:
+
+<Steps>
+  <Step title="Print prompt">
+    `console_print("> ")` writes the prompt to the VGA text buffer.
+  </Step>
+  <Step title="Read input">
+    `keyboard_readline(buf, sizeof(buf))` blocks until the user presses Enter. The result, including all typed characters, is stored in `buf` (256 bytes). If the returned length is `0` the loop continues immediately.
+  </Step>
+  <Step title="Pre-process the buffer">
+    Every `=` character in the buffer is replaced with `+`. This works around a PS/2 scan-code ambiguity where the `=` key can be misread.
+
+    ```c
+    for (int i = 0; buf[i]; ++i)
+        if (buf[i] == '=')
+            buf[i] = '+';
+    ```
+  </Step>
+  <Step title="Tokenize">
+    Four variables are populated from the buffer:
+
+    | Variable | Type | Content |
+    |---|---|---|
+    | `cmd` | `char[32]` | First whitespace-delimited token — the command name |
+    | `arg1` | `char[128]` | Second token |
+    | `arg2` | `char[128]` | Third token |
+    | `rest` | `char[192]` | Everything after `cmd`, leading whitespace stripped |
+  </Step>
+  <Step title="Dispatch">
+    A chain of `kstreq(cmd, "…")` comparisons selects the handler. Unrecognized commands print `"Unknown command. Type 'help' for a list of commands.\n"`.
+  </Step>
+</Steps>
+
+## Tokenization Internals
+
+Two static helpers do all the parsing work:
+
+```c
+/* Reads one whitespace-delimited token from s into out. Returns pointer past the token. */
+static const char *parse_token(const char *s, char *out, int maxlen);
+
+/* Copies everything from s (after skipping leading spaces) into out. */
+static void copy_rest(const char *s, char *out, int maxlen);
+```
+
+`parse_token()` first calls `kskip_spaces()` to advance past any leading spaces or tabs, then copies characters into `out` until it hits whitespace or end-of-string. `copy_rest()` is called with the pointer returned by the first `parse_token()` call (i.e., the tail after `cmd`) so that `rest` contains the full argument string available for commands like `echo`, `panic`, `lcp`, `systemctl`, and `asm`.
+
+<Note>
+The shell has a 256-byte input buffer (`char buf[256]`). `keyboard_readline()` accepts at most `maxlen - 1` characters before the null terminator, so commands longer than 255 characters are silently truncated at 255.
+</Note>
+
+---
+
+## Command Reference
+
+<CardGroup cols={2}>
+  <Card title="File System" icon="folder">
+    Commands that operate on the VFS node tree.
+
+    | Command | Usage | Description |
+    |---|---|---|
+    | `ls` | `ls [path]` | List directory contents. Omitting path lists `cwd`. |
+    | `pwd` | `pwd` | Print the current working directory. |
+    | `cd` | `cd <path>` | Change the current directory. |
+    | `mkdir` | `mkdir <path>` | Create a new directory. |
+    | `rmdir` | `rmdir <path>` | Remove an empty directory. |
+    | `rm` | `rm <path>` | Remove a file. |
+    | `touch` | `touch <path>` | Create an empty file (no-op if it exists). |
+    | `cp` | `cp <src> <dst>` | Copy a file to a new path. |
+    | `mv` | `mv <src> <dst>` | Move or rename a file. |
+    | `cat` | `cat <file>` | Print a file's contents to the console. |
+    | `grep` | `grep <pattern> <file>` | Search a file line-by-line; prints matching lines with line numbers. |
+    | `echo` | `echo <text> [> path]` | Print text or write it to a VFS file (see below). |
+    | `stat` | `stat <path>` | Print the path and file size in bytes. |
+    | `df` | `df` | Print a static disk usage summary for rootfs. |
+  </Card>
+
+  <Card title="System Info & Control" icon="terminal">
+    Commands that query kernel state or control execution.
+
+    | Command | Usage | Description |
+    |---|---|---|
+    | `uname` | `uname` | Print `CrisOS i386`. |
+    | `whoami` | `whoami` | Print `cris`. |
+    | `clear` | `clear` | Clear the VGA console (`console_clear()`). |
+    | `reboot` | `reboot` | Print a message, then call `reboot_cpu()`. |
+    | `panic` | `panic [msg]` | Trigger `kernel_panic()` with optional message. |
+  </Card>
+
+  <Card title="Subsystem Commands" icon="microchip">
+    Commands that delegate to other kernel subsystems.
+
+    | Command | Delegates to | Description |
+    |---|---|---|
+    | `systemctl` | `systemd_handle_command(rest)` | Manage service units. |
+    | `bootctl` | `boot_handle_command(rest)` | Boot control interface. |
+    | `lcp` | `lcp_handle_command(rest)` | LCP subsystem commands. |
+    | `gui` | `gui_show()` | Launch the graphical interface. |
+    | `mouse` | `mouse_get_state()` | Print current mouse X, Y, and button state. |
+  </Card>
+
+  <Card title="Utilities" icon="wrench">
+    Built-in utility commands.
+
+    | Command | Usage | Description |
+    |---|---|---|
+    | `asm` | `asm add\|sub\|mul\|div <a> <b>` | Run an assembly arithmetic operation. |
+    | `calc` | `calc <expr>` | Calculator application. |
+    | `kblayout` | `kblayout [us\|es\|de]` | Query or change the keyboard layout. |
+    | `help` | `help` | Print the full command list. |
+  </Card>
+</CardGroup>
+
+---
+
+## Echo and Output Redirection
+
+The `echo` command is handled by the dedicated `shell_echo()` helper:
+
+```c
+static void shell_echo(const char *args)
+```
+
+It scans the argument string for a single `>` character (not `>>`). Everything before `>` is treated as the text value; everything after it (trimmed) is the VFS destination path.
+
+```
+echo Hello, world!          → prints "Hello, world!\n" to console
+echo Hello, world! > /greet → calls vfs_write("/greet", "Hello, world!", 13)
+```
+
+When a destination path is found, `vfs_write()` is called directly with the text and its `kstrlen()`-computed length. The file is created if it does not exist. If `vfs_write()` fails (e.g. `data_store` is full or a read-only node is targeted) no error is printed.
+
+---
+
+## `asm` Command Internals
+
+The `asm` command calls `handle_asm_command(rest)`, which parses three tokens from `rest`:
+
+```c
+static void handle_asm_command(const char *args)
+{
+    char op[16], first[32], second[32];
+    /* parse_token × 3 */
+    int a = parse_int(first);
+    int b = parse_int(second);
+    int result = 0;
+    if      (kstreq(op, "add")) result = add_asm(a, b);
+    else if (kstreq(op, "sub")) result = sub_asm(a, b);
+    else if (kstreq(op, "mul")) result = mul_asm(a, b);
+    else if (kstreq(op, "div")) result = div_asm(a, b);
+    /* prints "= <result>\n" */
+}
+```
+
+`parse_int()` handles negative numbers (leading `-`). The four `*_asm()` functions are implemented in inline assembly in `src/asm.h`/`asm.c`.
+
+Example:
+```
+> asm mul 6 7
+= 42
+```
+
+---
+
+## Keyboard Layout Switching
+
+The `kblayout` command calls `keyboard_get_layout()` / `keyboard_set_layout()` and maps layout identifiers to human-readable names via the local `layout_name()` helper:
+
+| ID constant | String | Language |
+|---|---|---|
+| `KB_LAYOUT_US` (`0`) | `us (English)` | QWERTY US |
+| `KB_LAYOUT_ES` (`1`) | `es (Spanish)` | QWERTY ES |
+| `KB_LAYOUT_DE` (`2`) | `de (German)` | QWERTZ DE |
+
+```
+> kblayout
+Current layout: us (English)
+Usage: kblayout us|es|de
+
+> kblayout de
+Layout set to de (German)
+```
+
+<Tip>
+Type `help` at the shell prompt to print the complete list of available commands directly to the VGA console.
+</Tip>

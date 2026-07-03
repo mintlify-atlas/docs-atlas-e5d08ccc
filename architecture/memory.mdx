@@ -1,0 +1,115 @@
+---
+title: "CrisOS v2 Memory Layout and Bump Allocator"
+sidebarTitle: "Memory"
+description: "How CrisOS v2 manages memory: kernel load address, stack layout, 64 KB bump heap allocator, and VFS data store."
+---
+
+CrisOS v2 uses a simple, deterministic memory model suited to its educational 32-bit i386 environment. There is no virtual memory, no paging, and no free list — just a bump allocator backed by a fixed static array. Every allocation advances a single offset pointer and nothing is ever reclaimed. This design makes memory behavior fully predictable and easy to reason about, at the cost of a hard upper bound on total dynamic allocation.
+
+## Kernel Load Address
+
+The linker script places the kernel image starting at physical address `0x00100000` (1 MB):
+
+```text
+OUTPUT_FORMAT("elf32-i386")
+ENTRY(start)
+SECTIONS
+{
+  . = 0x00100000;
+  .multiboot : { *(.multiboot) }
+  .text      : { *(.text*)    }
+  .rodata    : { *(.rodata*)  }
+  .data      : { *(.data*)    }
+  .bss       : { *(.bss*) *(COMMON) }
+}
+```
+
+The 1 MB load address is a conventional choice for i386 kernels: everything below it is occupied by BIOS data areas, VGA memory, and legacy firmware regions that must not be overwritten.
+
+## Stack
+
+The kernel stack is a static 8 KB region declared in the `.bss` section of `boot/boot.S`:
+
+```asm
+.section .bss
+.align 16
+.lcomm stack, 8192
+.set stack_top, stack + 8192
+```
+
+The assembly entry point loads `$stack_top` into `%esp` and immediately 16-byte-aligns the pointer (`and $-16, %esp`) to satisfy the System V i386 ABI calling convention before invoking `kmain`. Because the region lives in `.bss` it is guaranteed to be zero-filled at load time.
+
+<CardGroup cols={2}>
+  <Card title="Stack base" icon="arrow-down">
+    `stack` — lowest address of the 8192-byte region, declared with `.lcomm`
+  </Card>
+  <Card title="Stack top" icon="arrow-up">
+    `stack_top = stack + 8192` — initial `%esp` value; grows downward toward `stack`
+  </Card>
+</CardGroup>
+
+## Bump Heap Allocator
+
+Dynamic memory in CrisOS v2 is managed by a minimal bump allocator in `src/memory.c`. The entire heap is a single `64 × 1024 = 65 536` byte static array:
+
+```c
+static unsigned char heap_area[64*1024];
+static size_t heap_used = 0;
+
+void *kmalloc(size_t size) {
+    if (size == 0) return 0;
+    // simple 4-byte align
+    size = (size + 3) & ~3;
+    if (heap_used + size > sizeof(heap_area)) return 0;
+    void *p = &heap_area[heap_used];
+    heap_used += size;
+    return p;
+}
+
+void kfree(void *p) {
+    // no-op simple allocator
+    (void)p;
+}
+```
+
+Key properties of this allocator:
+
+- **4-byte alignment** — every requested size is rounded up to the next multiple of 4 before the pointer is advanced, ensuring all returned pointers are naturally aligned for 32-bit accesses.
+- **No fragmentation tracking** — the bump pointer only moves forward; previously allocated blocks are never reused.
+- **`kfree` is a no-op** — the function accepts a pointer argument (to satisfy callers that expect a standard `free`-style interface) but does nothing with it.
+- **Exhaustion returns NULL** — if `heap_used + size > 65536`, `kmalloc` returns `0` (NULL). Callers are responsible for checking the return value.
+
+## VFS Data Store
+
+The Virtual File System layer (`src/vfs.c`) maintains a separate 16 KB flat buffer for the writable content of in-memory files:
+
+```c
+#define VFS_DATA_STORE_SIZE 16384
+
+static char data_store[VFS_DATA_STORE_SIZE];
+static size_t data_used = 0;
+```
+
+New file content is appended to `data_store` by advancing `data_used`. Like `kmalloc`, allocations from the data store are permanent — there is no mechanism to reclaim space once content has been written.
+
+## Memory Map Summary
+
+```text
+Physical Address Range       Region
+---------------------------  -------------------------------------------
+0x00000000 – 0x000FFFFF      Below kernel: BIOS data, IVT, VGA, firmware
+  0x000B8000                   VGA text-mode frame buffer (80×25 cells)
+0x00100000+                  Kernel ELF image (loaded by GRUB)
+  .multiboot                   Multiboot header (12 bytes)
+  .text                        Executable kernel code
+  .rodata                      Read-only data (strings, tables)
+  .data                        Initialized globals and statics
+  .bss                         Zero-initialized data
+    stack (8 192 bytes)          Kernel stack (grows downward)
+    heap_area (65 536 bytes)     kmalloc bump heap
+    data_store (16 384 bytes)    VFS writable data store
+```
+
+<Warning>
+`kmalloc` never frees memory. Once the 64 KB heap (`heap_area`) is exhausted it returns `NULL` — all callers must check for a `NULL` return and handle the out-of-memory condition explicitly. The VFS `data_store` has the same constraint: once the 16 KB buffer is full, no further writable file content can be allocated.
+</Warning>

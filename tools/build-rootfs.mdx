@@ -1,0 +1,157 @@
+---
+title: "Building the CrisOS v2 CRFS Rootfs Image"
+sidebarTitle: "Build Rootfs"
+description: "How build_rootfs.py packs the rootfs/ directory into a CRFS binary image that CrisOS v2 mounts at boot via the Multiboot module mechanism."
+---
+
+`tools/build_rootfs.py` converts the `rootfs/` directory into a flat CRFS binary image written to `iso/boot/rootfs.bin`. GRUB loads this image as a Multiboot module alongside the kernel, and the kernel's VFS layer mounts it as the root filesystem at boot. Every file placed under `rootfs/` during development is automatically visible inside the OS the next time the image is rebuilt.
+
+---
+
+## CRFS image format
+
+CRFS (CrisOS Root FileSystem) is a simple, read-only flat archive — conceptually similar to an initramfs cpio archive, but with a fixed 16-byte header and uniform 64-byte name fields. The entire format is defined in `tools/build_rootfs.py`.
+
+### Header
+
+```python
+MAGIC   = b'CRFS'
+VERSION = 1
+
+HEADER_FMT  = '<4sIII'   # magic(4) + version(4) + file_count(4) + reserved(4)
+HEADER_SIZE = struct.calcsize(HEADER_FMT)  # 16 bytes
+```
+
+| Offset | Size | Field | Value |
+|---|---|---|---|
+| 0 | 4 bytes | Magic | `CRFS` (ASCII) |
+| 4 | 4 bytes | Version | `1` (little-endian) |
+| 8 | 4 bytes | File count | Number of file entries |
+| 12 | 4 bytes | Reserved | `0` |
+
+### Per-file entry
+
+```python
+ENTRY_FMT  = '<64sII'   # name(64) + offset(4) + size(4)
+ENTRY_SIZE = struct.calcsize(ENTRY_FMT)  # 72 bytes
+```
+
+| Offset | Size | Field | Description |
+|---|---|---|---|
+| 0 | 64 bytes | Name | Null-terminated UTF-8 path, zero-padded to 64 bytes |
+| 64 | 4 bytes | Offset | Byte offset of file data from start of image |
+| 68 | 4 bytes | Size | File size in bytes |
+
+### Alignment
+
+All file data regions are **4-byte aligned**. The builder pads each file's data with `\x00` bytes to reach the next 4-byte boundary before writing the next file. The table of entries itself is also padded to a 4-byte boundary before the first byte of file data begins.
+
+### Build logic (abridged)
+
+```python
+MAGIC      = b'CRFS'
+VERSION    = 1
+HEADER_FMT = '<4sIII'
+ENTRY_FMT  = '<64sII'
+HEADER_SIZE = struct.calcsize(HEADER_FMT)
+ENTRY_SIZE  = struct.calcsize(ENTRY_FMT)
+
+def build_rootfs(rootdir, output_path):
+    # Walk rootdir, collect (relative_path, bytes) pairs
+    # Compute start offset = header + all entry structs, aligned to 4 bytes
+    offset = HEADER_SIZE + len(files) * ENTRY_SIZE
+    offset = (offset + 3) & ~3
+
+    # For each file: record (padded_name, offset, size), advance offset by
+    # len(data) rounded up to the next 4-byte boundary
+    for name, data in files:
+        entries.append((pad_name(name), offset, len(data)))
+        pad = (-len(data)) & 3
+        offset += len(data) + pad
+
+    # Write header → entries → alignment padding → concatenated file data
+```
+
+<Note>
+  File names are truncated to 63 bytes (the 64th byte is always `\x00`). A file whose relative path encodes to more than 63 UTF-8 bytes causes the builder to raise a `ValueError` and abort. Keep paths short or use short directory names.
+</Note>
+
+---
+
+## Building the image
+
+<Steps>
+  <Step title="Direct invocation">
+    ```bash
+    python tools/build_rootfs.py rootfs/ iso/boot/rootfs.bin
+    ```
+    Pass the source directory as the first argument and the output path as the second. The script creates `iso/boot/rootfs.bin`, overwriting any existing file.
+  </Step>
+  <Step title="Via Make">
+    ```bash
+    make iso
+    ```
+    The `Makefile` includes a rule for `$(ISO_DIR)/boot/rootfs.bin` that calls `build_rootfs.py` automatically. Running `make iso` (or `make echo-iso`) rebuilds the rootfs image along with the kernel and the final ISO.
+  </Step>
+</Steps>
+
+---
+
+## Rootfs directory contents
+
+The `rootfs/` tree is the source of truth for everything the OS can read at runtime. The current contents are:
+
+| Path | Description |
+|---|---|
+| `README.txt` | Welcome message displayed or read via `cat` at the shell |
+| `info.txt` | CrisOS version and build information |
+| `lcp_repo.txt` | LCP package repository in the in-kernel text format, parsed by `lcp_init()` at boot |
+| `bin/hello.txt` | Example file under `bin/`; demonstrates that binary-like paths work in CRFS |
+| `boot/hello.boot` | Example boot entry unit; parsed by `boot_init()` when scanning `boot/` for `.boot` files |
+| `share/nano-cris/help.txt` | Help text for the nano-cris editor package |
+| `systemd/hello.service` | Example systemd-like service unit file |
+
+---
+
+## Adding files to the rootfs
+
+<Steps>
+  <Step title="Place the file under rootfs/">
+    Copy or create any file anywhere within the `rootfs/` tree. Subdirectories are created automatically during the walk — you do not need to add empty directory entries.
+
+    ```bash
+    echo "Hello from rootfs" > rootfs/etc/motd
+    ```
+  </Step>
+  <Step title="Rebuild the image">
+    ```bash
+    make iso
+    ```
+    The builder re-walks the entire `rootfs/` directory and writes a fresh `iso/boot/rootfs.bin`. The new file is immediately visible to the kernel VFS on the next boot.
+  </Step>
+  <Step title="Verify inside the OS">
+    After booting the new ISO, use `cat` or `ls` at the shell to confirm the file appears:
+
+    ```text
+    CrisOS> cat etc/motd
+    Hello from rootfs
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+  Files in `rootfs/` are read-only once the CRFS image is mounted — the VFS layer does not support writes back to the Multiboot module. Use the shell's `touch` and `echo > file` commands to create writable files during a live session. Those files exist only in kernel memory and are **not** persisted across reboots. To make a file permanent, add it to `rootfs/` and run `make iso`.
+</Tip>
+
+---
+
+## How the kernel mounts the image
+
+GRUB's Multiboot specification lets a bootloader pass one or more binary modules to the kernel alongside the ELF image itself. The CrisOS v2 GRUB configuration adds `iso/boot/rootfs.bin` as a module. At kernel startup:
+
+1. The Multiboot info structure is inspected for module entries.
+2. The first module is treated as the CRFS image.
+3. The kernel reads the 16-byte header, validates the `CRFS` magic and version `1`, then iterates over the file-entry table to populate the in-memory VFS.
+4. From that point on, every `fs_find()` call resolves paths against the CRFS entry table.
+
+Because the entire image is loaded into memory by GRUB before the kernel runs, all file reads are simple pointer arithmetic into the module buffer — there is no disk I/O after boot.

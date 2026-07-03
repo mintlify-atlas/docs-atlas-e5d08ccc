@@ -1,0 +1,141 @@
+---
+title: "Running CrisOS v2 in QEMU"
+sidebarTitle: "QEMU"
+description: "How to boot and interact with CrisOS v2 in QEMU, including the boot sequence, shell interaction, and debugging tips."
+---
+
+QEMU is the primary way to run and test CrisOS v2. The `make run` target builds a bootable ISO and launches `qemu-system-i386` with 512 MB of RAM. GRUB reads `iso/boot/grub/grub.cfg`, loads `kernel.bin` via Multiboot, and passes `rootfs.bin` as a module. The boot sequence completes in under a second and drops you into the CrisOS interactive shell.
+
+## Launching the VM
+
+The quickest path from source to a running shell is a single command:
+
+```bash
+make run
+# which executes:
+qemu-system-i386 -cdrom os.iso -m 512M
+```
+
+If you have already built `os.iso` and only want to (re-)launch QEMU without rebuilding, you can invoke the emulator directly:
+
+```bash
+qemu-system-i386 -cdrom os.iso -m 512M
+```
+
+## Expected Boot Output
+
+After the GRUB splash screen disappears, the kernel initialises each subsystem in sequence and prints a status line for each one. A successful cold boot produces exactly the following console output:
+
+```text
+================================
+        CrisOS Kernel
+================================
+
+[ OK ] Console initialized
+[ OK ] PIC initialized (IRQs 0-15 remapped)
+[ OK ] PIT timer initialized (100 Hz)
+[ OK ] Keyboard initialized
+[ OK ] Multiboot modules detected
+[ INFO ] Mounting rootfs...
+[ OK ] Rootfs mounted
+[ OK ] VFS initialized
+[ OK ] Boot manager initialized
+[ OK ] Service manager initialized
+[ OK ] LCP package manager initialized
+
+[ASM] 7 + 5 = 12
+
+Launching shell...
+
+>
+```
+
+The `[ASM]` line is produced by a live call to `add_asm(7, 5)` — a small i386 assembly routine — and serves as a smoke-test that the ASM/C calling convention is working correctly.
+
+## Shell Interaction
+
+The `>` prompt accepts a single line of input at a time. Below are representative sessions showing the built-in commands:
+
+```text
+> help
+Commands: help clear ls pwd cd mkdir rmdir rm touch
+ cp mv cat grep echo uname whoami df stat panic
+ reboot lcp systemctl bootctl gui asm calc
+ kblayout mouse
+
+> uname
+CrisOS i386
+
+> ls
+README.txt  info.txt  lcp_repo.txt  bin/  boot/  share/  systemd/
+
+> cat info.txt
+MiniOS v0.1
+Sistema de archivos básico montado.
+
+> asm add 100 200
+= 300
+
+> calc 10 * (3 + 2)
+= 50
+```
+
+The rootfs is read-only; `mkdir`, `rm`, and similar commands operate on an in-memory VFS layer and do not persist across reboots.
+
+## QEMU-Specific Notes
+
+<CardGroup cols={2}>
+  <Card title="Keyboard capture" icon="keyboard">
+    Keyboard input is captured by the QEMU window. Your host's global shortcuts (e.g. `Super`, `Alt+Tab`) will not reach the host desktop while the VM window is focused.
+  </Card>
+  <Card title="Release mouse grab" icon="computer-mouse">
+    If QEMU captures the mouse pointer, press **`Ctrl+Alt+G`** to release it back to the host.
+  </Card>
+  <Card title="QEMU monitor" icon="terminal">
+    Press **`Ctrl+Alt+2`** to switch to the QEMU monitor console. Type `quit` and press Enter to shut down the VM cleanly.
+  </Card>
+  <Card title="Switch back to VM" icon="display">
+    Press **`Ctrl+Alt+1`** to return to the VM display from the QEMU monitor.
+  </Card>
+</CardGroup>
+
+## Running Without grub-mkrescue
+
+If `grub-mkrescue` is not installed, `make echo-iso` prints a warning and skips ISO generation:
+
+```text
+Instala grub-mkrescue para crear os.iso
+```
+
+In that case you can still boot the kernel directly using QEMU's built-in `-kernel` flag:
+
+```bash
+qemu-system-i386 -kernel build/kernel.bin -m 512M
+```
+
+<Warning>
+When booting with `-kernel` instead of `-cdrom`, QEMU does not pass the `rootfs.bin` file as a Multiboot module. The kernel will print `[FAIL] No multiboot modules found` and the VFS will not initialise. All filesystem-dependent commands (`ls`, `cat`, `cd`, etc.) will be unavailable in the shell.
+</Warning>
+
+## Debugging with QEMU
+
+QEMU exposes several flags that are useful when hunting down kernel bugs:
+
+| Flag | Effect |
+|---|---|
+| `-d int,cpu_reset` | Log CPU exceptions and reset events to stderr |
+| `-d cpu_reset -D qemu.log` | Write the debug log to `qemu.log` instead of stderr |
+| `-monitor stdio` | Expose the QEMU monitor on the terminal instead of `Ctrl+Alt+2` |
+| `-no-reboot` | Halt instead of resetting on a triple fault — essential for catching boot crashes |
+| `-serial stdio` | Route the emulated serial port to the terminal (useful if you add a serial driver) |
+
+A typical debugging invocation looks like:
+
+```bash
+qemu-system-i386 -cdrom os.iso -m 512M \
+    -d int,cpu_reset -no-reboot -monitor stdio
+```
+
+<Warning>
+The `reboot` and `panic` shell commands interact with real hardware reset lines (keyboard controller reset and the ACPI/APM power signals). They work correctly and safely inside QEMU. Exercise appropriate caution if you ever run CrisOS v2 on physical i386 hardware.
+</Warning>

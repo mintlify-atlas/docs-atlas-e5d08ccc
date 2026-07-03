@@ -1,47 +1,172 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with CrisOS v2"
+sidebarTitle: "Quickstart"
+description: "Build the CrisOS v2 kernel, generate a bootable ISO with GRUB, and run it in QEMU in under five minutes."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+This guide walks you through cloning the CrisOS v2 repository, compiling the freestanding i386 kernel, packing the CRFS rootfs image, generating a bootable ISO with GRUB, and launching the system inside QEMU — from a fresh checkout to an interactive shell prompt in about five minutes.
 
 ## Prerequisites
 
-Before you begin, you must have:
+Before you start, make sure the following tools are available on your host machine:
 
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
+| Tool | Notes |
+|---|---|
+| `gcc` or `i686-elf-gcc` | A C compiler that can target 32-bit i386. A bare-metal cross-compiler is recommended but not required. |
+| `make` | Standard GNU Make for running the build targets. |
+| `qemu-system-i386` | QEMU machine emulator — install via your package manager (e.g. `qemu-system-x86`). |
+| `grub-mkrescue` | Part of GRUB 2 utilities — needed only to produce a bootable ISO. |
+| Python 3 | Used by `tools/build_rootfs.py` to pack the rootfs directory into a CRFS binary image. |
 
-## Get started
+<Tip>
+  If `i686-elf-gcc` is not found on your `PATH`, the Makefile automatically falls back to the system `gcc`. The detection happens at the top of the Makefile using `command -v i686-elf-gcc`, so no manual configuration is required.
+</Tip>
+
+## Build and Run
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Clone the repository">
+    Grab the source code from GitHub and enter the project directory:
 
     ```bash
-    npm install your-package
+    git clone https://github.com/CRISTOP-bot/cris-os-v2.git
+    cd cris-os-v2
     ```
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+
+  <Step title="Build the kernel">
+    Run `make` (or `make all`) to compile all C and Assembly sources and link them into the kernel binary:
 
     ```bash
-    your-cli init
+    make
+    ```
+
+    The Makefile compiles every `.c` file in `src/` and `drivers/`, assembles `boot/boot.S`, `src/asm_utils.S`, and `src/math_asm.S`, then links the objects via `linker.ld` using these flags:
+
+    ```makefile
+    CFLAGS  = -ffreestanding -O2 -Wall -Wextra -m32 -nostdlib -std=c99 -I src
+    ASFLAGS = -m32 -ffreestanding
+    LDFLAGS = -m elf_i386 -nostdlib
+    ```
+
+    On success, the kernel ELF binary is written to:
+
+    ```text
+    build/kernel.bin
     ```
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+
+  <Step title="Build the rootfs and create a bootable ISO">
+    Run `make echo-iso` to pack the rootfs, copy the kernel into the ISO tree, and invoke `grub-mkrescue`:
 
     ```bash
-    your-cli start
+    make echo-iso
+    ```
+
+    This target does three things in sequence:
+
+    1. Runs `tools/build_rootfs.py rootfs iso/boot/rootfs.bin` — walks the `rootfs/` directory and writes a CRFS-format binary image (4-byte magic `CRFS`, version field, file entry table, then file data).
+    2. Copies `build/kernel.bin` to `iso/boot/kernel.bin`.
+    3. Calls `grub-mkrescue -o os.iso iso/` to produce a hybrid El Torito ISO using the GRUB configuration in `iso/boot/grub/grub.cfg`.
+
+    The final output is:
+
+    ```text
+    os.iso
+    ```
+  </Step>
+
+  <Step title="Run in QEMU">
+    Launch the ISO in a QEMU virtual machine with 512 MB of RAM:
+
+    ```bash
+    make run
+    ```
+
+    This is equivalent to:
+
+    ```bash
+    qemu-system-i386 -cdrom os.iso -m 512M
+    ```
+
+    GRUB reads `iso/boot/grub/grub.cfg`, loads `kernel.bin` and the `rootfs.bin` module, and hands control to the `start` symbol in `boot/boot.S`. The kernel clears the screen, initializes all subsystems in order (GDT → IDT → PIC → timer → keyboard → mouse → VFS → services), and drops into the shell.
+
+    You should see:
+
+    ```text
+    ================================
+            CrisOS Kernel
+    ================================
+
+    [ OK ] Console initialized
+    [ OK ] PIC initialized (IRQs 0-15 remapped)
+    [ OK ] PIT timer initialized (100 Hz)
+    [ OK ] Keyboard initialized
+    [ OK ] Multiboot modules detected
+    [ INFO ] Mounting rootfs...
+    [ OK ] Rootfs mounted
+    [ OK ] VFS initialized
+    [ OK ] Boot manager initialized
+    [ OK ] Service manager initialized
+    [ OK ] LCP package manager initialized
+
+    [ASM] 7 + 5 = 12
+
+    Launching shell...
+
+    >
+    ```
+  </Step>
+
+  <Step title="Use the shell">
+    Once the `>` prompt appears, you can issue commands. Here is a short interactive session demonstrating the built-in commands:
+
+    ```text
+    > help
+    Commands: help clear ls pwd cd mkdir rmdir rm touch
+               cp mv cat grep echo uname whoami df stat panic
+               reboot lcp systemctl bootctl gui asm calc
+               kblayout mouse
+
+    > uname
+    CrisOS i386
+
+    > ls
+    README.txt
+    info.txt
+    lcp_repo.txt
+
+    > cat README.txt
+    Bienvenido a MiniOS.
+    Usa los comandos ls y cat para explorar archivos.
+
+    > asm add 42 58
+    = 100
+
+    > calc 3 + 4 * 2
+    = 11
+
+    > lcp search editor
+    editor-lite
+    nano-cris
+    textpad
+
+    > whoami
+    cris
+
+    > df
+    Filesystem  1K-blocks  Used  Avail  Mounted on
+    rootfs      64        8     56     /
     ```
   </Step>
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## Make Targets Reference
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+| Target | What it does |
+|---|---|
+| `make` | Compiles all C and Assembly sources and links `build/kernel.bin`. |
+| `make iso` | Builds the kernel and packs `iso/boot/rootfs.bin` from `rootfs/`. |
+| `make echo-iso` | Runs `make iso`, then calls `grub-mkrescue` to produce `os.iso`. |
+| `make run` | Runs `make echo-iso`, then launches `qemu-system-i386 -cdrom os.iso -m 512M`. |
+| `make clean` | Removes `build/`, `os.iso`, `iso/boot/kernel.bin`, and `iso/boot/rootfs.bin`. |

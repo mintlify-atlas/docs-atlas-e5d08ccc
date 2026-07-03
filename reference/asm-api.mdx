@@ -1,0 +1,259 @@
+---
+title: "CrisOS v2 Assembly Utilities API Reference"
+sidebarTitle: "ASM API"
+description: "C-callable assembly function reference for CrisOS v2: arithmetic operations, CPU control, I/O port access, and VGA memory helpers defined in asm.h."
+---
+
+`asm.h` declares C-callable assembly routines implemented in `src/asm_utils.S` and `src/math_asm.S`. These functions perform operations that require direct x86 instruction access: integer arithmetic (for educational demonstration via the shell's `asm` command), CPU halt and reset, I/O port read/write used by every hardware driver, and fast VGA memory operations used by the console and GUI overlay. All routines use the standard i386 cdecl calling convention.
+
+---
+
+## Integer Arithmetic
+
+These four functions expose raw x86 arithmetic instructions through C-callable wrappers. They are used by the shell's built-in `asm <op> <a> <b>` command to demonstrate low-level computation directly.
+
+### `add_asm`
+
+```c
+int add_asm(int a, int b);
+```
+
+Adds two signed 32-bit integers using the x86 `add` instruction. Implemented in `src/math_asm.S`.
+
+<ParamField path="a" type="int" required>
+  First operand. Loaded into `%eax`.
+</ParamField>
+
+<ParamField path="b" type="int" required>
+  Second operand. Added to `%eax` via `addl 12(%ebp), %eax`.
+</ParamField>
+
+**Returns:** The sum `a + b` as a signed 32-bit integer. Overflow wraps silently (no exception).
+
+---
+
+### `sub_asm`
+
+```c
+int sub_asm(int a, int b);
+```
+
+Subtracts `b` from `a` using the x86 `subl` instruction. Implemented in `src/asm_utils.S`.
+
+<ParamField path="a" type="int" required>
+  Minuend. Loaded into `%eax`.
+</ParamField>
+
+<ParamField path="b" type="int" required>
+  Subtrahend. Subtracted from `%eax` via `subl 12(%ebp), %eax`.
+</ParamField>
+
+**Returns:** The difference `a - b` as a signed 32-bit integer.
+
+---
+
+### `mul_asm`
+
+```c
+int mul_asm(int a, int b);
+```
+
+Multiplies two signed 32-bit integers using the x86 `imull` instruction. Implemented in `src/asm_utils.S`.
+
+<ParamField path="a" type="int" required>
+  First factor. Loaded into `%eax`.
+</ParamField>
+
+<ParamField path="b" type="int" required>
+  Second factor. Multiplied into `%eax` via `imull 12(%ebp), %eax`.
+</ParamField>
+
+**Returns:** The low 32 bits of the product `a * b`. High bits are discarded silently on overflow.
+
+---
+
+### `div_asm`
+
+```c
+int div_asm(int a, int b);
+```
+
+Performs signed integer division of `a` by `b` using the x86 `cdq` / `idivl` instruction sequence. The dividend in `%eax` is sign-extended into `%edx:%eax` via `cdq` before `idivl` computes the quotient in `%eax`. If `b` is zero the function returns `0` immediately (zero-check guard via `testl`/`jnz`). Implemented in `src/asm_utils.S`.
+
+<ParamField path="a" type="int" required>
+  Dividend. Loaded into `%eax` and sign-extended into `%edx`.
+</ParamField>
+
+<ParamField path="b" type="int" required>
+  Divisor. Loaded into `%ecx`. If zero, the function returns `0` without executing `idivl`.
+</ParamField>
+
+**Returns:** The integer quotient `a / b`. The remainder (in `%edx`) is discarded.
+
+<Warning>
+  Passing `b = 0` would normally cause a Division-by-Zero exception (interrupt 0). `div_asm` guards against this explicitly and returns `0` instead. Higher-level callers should still validate inputs to avoid silent incorrect results.
+</Warning>
+
+---
+
+## CPU Control
+
+### `halt_cpu`
+
+```c
+void halt_cpu(void);
+```
+
+Disables interrupts with `cli` and then enters an infinite `hlt` loop. The CPU is permanently halted until the system is physically reset. Used by the kernel after a fatal error or panic. Implemented in `src/asm_utils.S`.
+
+**Returns:** Never returns.
+
+```c
+/* Kernel panic — halt unconditionally */
+console_print("KERNEL PANIC: unhandled exception\n");
+halt_cpu();
+```
+
+---
+
+### `reboot_cpu`
+
+```c
+void reboot_cpu(void);
+```
+
+Triggers a hardware reboot by writing `0xFE` to PS/2 controller port `0x64`. The PS/2 controller's system reset line is pulsed, causing the CPU to reset. Interrupts are disabled with `cli` first. Implemented in `src/asm_utils.S` as:
+
+```text
+cli
+movw  $0x64, %dx
+movb  $0xFE, %al
+outb  %al, %dx
+```
+
+After the `outb` the code spins in a local jump loop — the CPU should reset before reaching it.
+
+**Returns:** Never returns under normal operation.
+
+---
+
+## I/O Port Access
+
+### `inb`
+
+```c
+unsigned char inb(unsigned short port);
+```
+
+Reads one byte from x86 I/O port `port` using the `inb %dx, %al` instruction. The port number is loaded into `%dx` and the result byte is zero-extended into `%eax` before returning. Used by every hardware driver in CrisOS v2 (keyboard, timer, PIC). Implemented in `src/asm_utils.S`.
+
+<ParamField path="port" type="unsigned short" required>
+  16-bit I/O port address to read from.
+</ParamField>
+
+**Returns:** The byte value read from the port.
+
+<Note>
+  The x86 `in` instruction is privileged in ring 3. CrisOS v2 runs entirely in ring 0 (kernel mode), so all I/O port access is unrestricted.
+</Note>
+
+---
+
+### `outb`
+
+```c
+void outb(unsigned short port, unsigned char value);
+```
+
+Writes one byte `value` to x86 I/O port `port` using the `outb %al, %dx` instruction. The port is loaded into `%dx` and the value into `%al`. Used by every hardware driver in CrisOS v2. Implemented in `src/asm_utils.S`.
+
+<ParamField path="port" type="unsigned short" required>
+  16-bit I/O port address to write to.
+</ParamField>
+
+<ParamField path="value" type="unsigned char" required>
+  Byte value to write to the port.
+</ParamField>
+
+**Returns:** Nothing (`void`).
+
+<Note>
+  The x86 `out` instruction is privileged in ring 3. CrisOS v2 runs entirely in ring 0, so all I/O port access is unrestricted.
+</Note>
+
+---
+
+## VGA Memory Helpers
+
+### `console_putxy`
+
+```c
+void console_putxy(int x, int y, char c, unsigned char attr);
+```
+
+Writes the character `c` with VGA attribute byte `attr` directly to the VGA text-mode buffer at column `x`, row `y`. The VGA text buffer base address is `0xB8000`; each cell occupies two bytes (low byte = character, high byte = attribute). The offset is calculated as `(y * 80 + x) * 2`. Implemented in `src/asm_utils.S`. Used by the GUI overlay to paint individual cells without going through the console scroll logic.
+
+<ParamField path="x" type="int" required>
+  Column index (0–79 for a standard 80-column display).
+</ParamField>
+
+<ParamField path="y" type="int" required>
+  Row index (0–24 for a standard 25-row display).
+</ParamField>
+
+<ParamField path="c" type="char" required>
+  ASCII character to write.
+</ParamField>
+
+<ParamField path="attr" type="unsigned char" required>
+  VGA attribute byte. The high nibble is the background colour and the low nibble is the foreground colour. For example, `0x0F` is bright white on black, `0x4F` is bright white on red, and `0x1E` is yellow on blue.
+</ParamField>
+
+**Returns:** Nothing (`void`).
+
+---
+
+### `memsetw_asm`
+
+```c
+void memsetw_asm(void *dest, unsigned short value, unsigned int count);
+```
+
+Fills `count` consecutive 16-bit words starting at `dest` with `value`, using the `rep stosw` instruction for maximum throughput. `%edi` is set to `dest`, `%ax` to `value`, `%ecx` to `count`, and the direction flag is cleared with `cld` before the repeat. Used for fast VGA screen clearing — one call can blank the entire 80×25 text buffer (2000 words) in a single instruction burst. Implemented in `src/asm_utils.S`.
+
+<ParamField path="dest" type="void *" required>
+  Pointer to the start of the destination region. For full-screen VGA clearing this is typically `(void *)0xB8000`.
+</ParamField>
+
+<ParamField path="value" type="unsigned short" required>
+  16-bit word to fill with. For VGA, pack the character in the low byte and the attribute in the high byte (e.g. `0x0720` for a space with a light-grey-on-black attribute).
+</ParamField>
+
+<ParamField path="count" type="unsigned int" required>
+  Number of 16-bit words to write. For a full 80×25 VGA screen, pass `2000`.
+</ParamField>
+
+**Returns:** Nothing (`void`).
+
+---
+
+## Usage Examples
+
+```c
+/* I/O port access — read PS/2 status, send enable-scanning command */
+unsigned char status = inb(0x64);   /* PS/2 controller status register */
+outb(0x60, 0xF4);                   /* send "enable scanning" to PS/2 device */
+
+/* VGA direct cell write — place 'X' in white-on-red at the screen centre */
+console_putxy(40, 12, 'X', 0x4F);
+
+/* Clear the entire VGA screen to spaces with light-grey-on-black */
+memsetw_asm((void *)0xB8000, 0x0720, 80 * 25);
+
+/* Assembly arithmetic via shell-exposed wrappers */
+int result = mul_asm(7, 6);   /* result = 42 */
+int safe   = div_asm(10, 0);  /* safe = 0, no exception */
+
+/* Halt after unrecoverable error */
+halt_cpu();   /* never returns */
+```

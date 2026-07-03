@@ -1,0 +1,211 @@
+---
+title: "CrisOS v2 Virtual File System: VFS and CRFS Rootfs"
+sidebarTitle: "VFS"
+description: "How CrisOS v2 implements an in-memory tree VFS, mounts a CRFS flat image via Multiboot, and exposes file and directory operations to the shell."
+---
+
+CrisOS v2 uses a two-layer file system stack. The lower layer (`fs.c`) parses a flat CRFS binary image loaded as a Multiboot module, validating its magic bytes and unpacking its entry table into an array of `fs_file` structs. The upper layer (`vfs.c`) consumes those structs at boot, walks every file path component by component, creates intermediate directory nodes automatically, and presents a unified in-memory node tree to the rest of the kernel. All shell file operations — `ls`, `cat`, `cp`, `mkdir`, `touch`, `echo >`, and more — talk exclusively to the VFS API.
+
+## CRFS Image Format
+
+The rootfs image is built by `tools/build_rootfs.py`, which walks a directory tree and packs all files into a single binary blob. The format is fully described by two packed C structs in `fs.c`:
+
+```c
+struct fs_header {
+    char     magic[4];      /* 'C', 'R', 'F', 'S' */
+    uint32_t version;       /* must be 1            */
+    uint32_t file_count;
+    uint32_t reserved;      /* always 0             */
+};
+
+struct fs_entry {
+    char     name[64];      /* null-terminated path, e.g. "systemd/hello.service" */
+    uint32_t offset;        /* byte offset from start of image */
+    uint32_t size;          /* file size in bytes              */
+};
+```
+
+Both structs are packed (`#pragma pack(push, 1)`), so there is no implicit padding between fields.
+
+### Binary Layout
+
+```
+Offset 0
+┌─────────────────────────────────┐
+│ fs_header  (16 bytes)           │  magic[4] + version + file_count + reserved
+├─────────────────────────────────┤
+│ fs_entry[0]  (72 bytes)         │  name[64] + offset(4) + size(4)
+│ fs_entry[1]  (72 bytes)         │
+│  ...                            │
+│ fs_entry[N-1]                   │
+├─────────────────────────────────┤
+│ <4-byte alignment pad>          │  (-current_offset) & 3
+├─────────────────────────────────┤
+│ file data[0]   (size + pad)     │  each file padded to 4-byte boundary
+│ file data[1]                    │
+│  ...                            │
+└─────────────────────────────────┘
+```
+
+The Python builder computes each entry's `offset` as an absolute byte position from the start of the image. File content blocks are each individually padded to a 4-byte boundary using `(-len(data)) & 3` null bytes.
+
+### Python format strings
+
+| Struct | Format | Size |
+|--------|--------|------|
+| Header | `<4sIII` | 16 bytes |
+| Entry  | `<64sII` | 72 bytes |
+
+---
+
+## `fs.c` — Low-Level CRFS Parser
+
+`fs.c` validates and indexes the raw CRFS image. It exposes four public functions declared in `fs.h`:
+
+```c
+struct fs_file {
+    const char *name;   /* points into the entry's name[64] field */
+    const void *data;   /* points into the image at entry->offset  */
+    size_t      size;
+};
+
+int                   fs_init(const void *image, size_t size);
+const struct fs_file *fs_find(const char *name);
+const struct fs_file *fs_file_at(size_t index);
+size_t                fs_file_count(void);
+```
+
+### Initialization — `fs_init()`
+
+```c
+bool fs_init(const void *image, size_t size)
+```
+
+1. Checks `image != NULL` and `size >= sizeof(fs_header_t)`.
+2. Casts the pointer to `fs_header_t *` and validates the four magic bytes `'C','R','F','S'`.
+3. Rejects any `version != 1`.
+4. Computes `table_size = file_count * sizeof(fs_entry_t)` and verifies `size >= sizeof(header) + table_size`.
+5. Iterates every entry and confirms `entry->offset + entry->size <= size` (no out-of-bounds data).
+6. Stores `fs_image_base`, `fs_entries`, and `fs_entry_count` in static module-level variables.
+
+### Lookup — `fs_find()`
+
+```c
+const struct fs_file *fs_find(const char *name)
+```
+
+Performs a linear scan over all entries using `kstrcmp()`. Returns a pointer to a static `struct fs_file` filled in from the matching entry, or `NULL` if not found. The search is case-sensitive and matches the full relative path stored in the entry (e.g. `"systemd/hello.service"`).
+
+### Enumeration — `fs_file_at()` and `fs_file_count()`
+
+```c
+const struct fs_file *fs_file_at(size_t index);
+size_t                fs_file_count(void);
+```
+
+`fs_file_count()` returns the total number of entries parsed. `fs_file_at(index)` fills and returns a static `struct fs_file` for the entry at `index`, or `NULL` if `index >= fs_entry_count`. Both are used by `vfs_init()` to iterate the entire image.
+
+---
+
+## `vfs.c` — In-Memory Node Tree
+
+The VFS layer builds a tree of `vfs_node` structs entirely in RAM. There is no disk-backed persistence of any kind.
+
+### Node Structure
+
+```c
+#define VFS_MAX_NODES     80
+#define VFS_NAME_SIZE     64
+#define VFS_CHILDREN_MAX  16
+#define VFS_DATA_STORE_SIZE 16384
+
+struct vfs_node {
+    char        name[VFS_NAME_SIZE]; /* node's basename                         */
+    bool        is_dir;              /* true for directories                     */
+    bool        read_only;           /* true for rootfs-backed nodes             */
+    const char *data;                /* pointer to read-only file content        */
+    size_t      size;                /* size of read-only content                */
+    char       *own_data;            /* pointer into data_store for writable files */
+    size_t      own_size;
+    int         parent;              /* index into nodes[], -1 for root          */
+    int         child_count;
+    int         children[VFS_CHILDREN_MAX]; /* indices of child nodes            */
+};
+```
+
+`nodes[0]` is always the root node (`/`). It is initialized with `is_dir = true`, `read_only = true`, and `parent = -1`. The current working directory is tracked by the module-level `cwd_node` integer index.
+
+Writable file content is allocated from a flat static buffer:
+
+```c
+static char   data_store[VFS_DATA_STORE_SIZE];
+static size_t data_used;
+```
+
+`vfs_alloc_data()` bumps `data_used` by the requested size and returns a pointer. Allocations are never freed — the store is write-once per session.
+
+### Initialization — `vfs_init()`
+
+`vfs_init()` is called once during kernel startup, after `fs_init()` has successfully parsed the CRFS image.
+
+<Steps>
+  <Step title="Clear all nodes">
+    Every slot in `nodes[]` has its `name[0]` set to `'\0'` and `parent` set to `-1`.
+  </Step>
+  <Step title="Create the root node">
+    `nodes[0]` is configured as the root directory: `is_dir = true`, `read_only = true`, `parent = -1`. `cwd_node` is set to `0`.
+  </Step>
+  <Step title="Walk all fs_file entries">
+    For each file returned by `fs_file_at(i)`, the path is split on `/` character by character. For each component that is not yet a child of the current node, a new node is allocated via `vfs_new_node()`.
+  </Step>
+  <Step title="Create intermediate directories automatically">
+    If a path component is encountered while more components remain (i.e. `*p != '\0'` after consuming the component), it is created as a read-only directory node and linked to its parent.
+  </Step>
+  <Step title="Create the leaf file node">
+    The final component is created as a read-only file node with `data` pointing into the CRFS image and `size` from the `fs_file` entry.
+  </Step>
+</Steps>
+
+### Path Resolution
+
+The static `vfs_resolve(path)` function converts a path string to a node index:
+
+- **Absolute paths** (starting with `/`): resolution starts from `root_node`.
+- **Relative paths**: resolution starts from `cwd_node`.
+- **`.`** components: the current node is unchanged.
+- **`..`** components: the current node is replaced by its `parent` (capped at root — the root node's parent is `-1`, so the walk stops there).
+- Each remaining component is looked up among the current node's children via `vfs_find_child()`, which iterates `children[]` comparing names with `kstrcmp()`.
+
+---
+
+## Public VFS API
+
+All functions are declared in `vfs.h`. Return values follow a consistent convention: functions that return `int` or `bool` return `0`/`false` on failure and non-zero/`true` on success.
+
+| Function | Signature | Description |
+|---|---|---|
+| `vfs_init` | `int vfs_init(void)` | Build the node tree from the CRFS image. Call once at boot. |
+| `vfs_pwd` | `const char *vfs_pwd(void)` | Return the absolute path of the current working directory. |
+| `vfs_cd` | `int vfs_cd(const char *path)` | Change the current working directory; fails if path is not a directory. |
+| `vfs_list` | `int vfs_list(const char *path)` | Print the contents of a directory to the console. Passing `NULL` or `""` lists `cwd`. |
+| `vfs_cat` | `int vfs_cat(const char *path)` | Print a file's content to the console byte-by-byte; null bytes are printed as `'\n'`. |
+| `vfs_mkdir` | `int vfs_mkdir(const char *path)` | Create a new directory node. Fails if any ancestor is missing. |
+| `vfs_touch` | `int vfs_touch(const char *path)` | Create an empty file node. No-ops if the path already exists. |
+| `vfs_remove` | `int vfs_remove(const char *path)` | Remove a file node. Refuses to remove directories or read-only nodes. |
+| `vfs_rmdir` | `int vfs_rmdir(const char *path)` | Remove an empty directory node. Refuses non-empty or read-only nodes. |
+| `vfs_cp` | `int vfs_cp(const char *src, const char *dst)` | Copy a file into a new path; allocates a copy of the data in `data_store`. |
+| `vfs_mv` | `int vfs_mv(const char *src, const char *dst)` | Rename or move a file; relinks the node under the new parent. |
+| `vfs_write` | `int vfs_write(const char *path, const char *content, size_t length)` | Write content to a file; creates the file if it does not exist. Allocates from `data_store`. |
+| `vfs_read` | `const void *vfs_read(const char *path)` | Return a pointer to a file's content. Returns `NULL` for directories or missing paths. |
+| `vfs_get_size` | `size_t vfs_get_size(const char *path)` | Return the byte size of a file. Returns `0` for directories or missing paths. |
+| `vfs_exists` | `int vfs_exists(const char *path)` | Return non-zero if the path resolves to any node (file or directory). |
+
+---
+
+<Note>
+The VFS is entirely in-memory. Files created with `touch`, `mkdir`, or `echo > file` exist only for the current session and are lost when the system reboots. Nodes backed by the CRFS rootfs image have `read_only = true`; attempts to `rm` or overwrite them will fail silently.
+</Note>
+
+<Warning>
+`VFS_MAX_NODES` is `80` and `VFS_DATA_STORE_SIZE` is `16384` bytes. Exhausting either limit causes silent failure — `vfs_mkdir()` and `vfs_write()` return `0` (false) without printing an error. The rootfs itself consumes several nodes at boot, so the effective budget for runtime-created nodes is less than 80.
+</Warning>

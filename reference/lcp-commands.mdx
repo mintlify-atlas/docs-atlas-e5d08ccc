@@ -1,0 +1,565 @@
+---
+title: "LCP Package Manager Command Reference"
+sidebarTitle: "LCP Commands"
+description: "Complete reference for the lcp CLI tool: all commands, flags, exit codes, and repository management for CrisOS v2's Lightweight CrisOS Packager."
+---
+
+The LCP host-side CLI (`tools/lcp.py`) is a Python 3 script that manages packages for CrisOS v2 development. It supports searching, installing, removing, upgrading, and verifying packages, as well as managing repository sources. All persistent state is stored under `~/.lcp/` on the host machine; the tool does not interact with a running CrisOS instance.
+
+**Global usage:**
+
+```bash
+python tools/lcp.py <command> [args] [options]
+```
+
+**Storage paths:**
+
+| Path | Purpose |
+|------|---------|
+| `~/.lcp/repos.json` | List of configured repository sources |
+| `~/.lcp/installed.json` | Installed package state and file manifests |
+| `~/.lcp/cache/<name>.json` | Cached repository index for each repo named `<name>` |
+
+<Note>
+  The host CLI and the in-kernel LCP share package concepts (names, versions,
+  dependencies, file lists) but are entirely independent implementations. The
+  host tool manages a file-system simulation on the development machine;
+  the in-kernel version parses a `lcp_repo.txt` text file from the VFS at
+  runtime. Neither tool communicates with the other.
+</Note>
+
+---
+
+## Exit Codes
+
+All `lcp` commands exit with one of the following codes:
+
+| Code | Constant | Meaning |
+|------|----------|---------|
+| 0 | `EXIT_SUCCESS` | Command succeeded |
+| 1 | `EXIT_ERROR` | General error |
+| 2 | `EXIT_INVALID_COMMAND` | Unknown or malformed command |
+| 3 | `EXIT_NOT_FOUND` | Package not found |
+| 4 | `EXIT_DEP_MISSING` | One or more dependencies not found in any repo |
+| 5 | `EXIT_INSTALL_FAIL` | File system error during install or remove |
+| 6 | `EXIT_PERMISSIONS` | Permission denied while writing files |
+| 7 | `EXIT_REPO_DOWN` | Failed to fetch a repository index |
+| 8 | `EXIT_ALREADY_INSTALLED` | Package is already installed (and `--force` was not passed) |
+| 9 | `EXIT_CORRUPT` | Corrupt repository or package data |
+
+---
+
+## Package Commands
+
+### `help`
+
+```bash
+python tools/lcp.py help [command]
+```
+
+Without an argument, prints the full general help text listing every available command, its syntax, and all options. With an argument, prints detailed help for that specific command.
+
+<ParamField path="command" type="string">
+  Optional. Name of the command to get detailed help for, e.g. `install`,
+  `repo`, `list`.
+</ParamField>
+
+**Examples:**
+
+```bash
+python tools/lcp.py help
+python tools/lcp.py help install
+python tools/lcp.py help repo
+```
+
+---
+
+### `search`
+
+```bash
+python tools/lcp.py search <term>
+```
+
+Searches package names and descriptions across all enabled, cached repositories. The match is case-insensitive and substring-based. Returns a sorted list of matching package names, one per line. Prints nothing if there are no matches.
+
+<ParamField path="term" type="string" required>
+  Substring to search for. Matched against both the package `name` and
+  `description` fields.
+</ParamField>
+
+**Example:**
+
+```bash
+python tools/lcp.py search editor
+# editor-lite
+# nano-cris
+# textpad
+```
+
+<Tip>
+  Run `python tools/lcp.py update` first to ensure the local cache is
+  populated before searching.
+</Tip>
+
+---
+
+### `info`
+
+```bash
+python tools/lcp.py info <package>
+```
+
+Displays full metadata for the named package from the cached repository index. Exits with code `3` (`EXIT_NOT_FOUND`) if the package is not found in any enabled repo.
+
+<ParamField path="package" type="string" required>
+  Exact package name to look up.
+</ParamField>
+
+**Output fields:**
+
+| Field | Description |
+|-------|-------------|
+| `name` | Package identifier |
+| `version` | Version string |
+| `description` | Human-readable summary |
+| `size` | Estimated size in bytes |
+| `dependencies` | Comma-separated list, or `none` |
+| `repository` | Source repo name |
+| `author` | Maintainer name (`maintainer` field) |
+| `license` | SPDX license identifier |
+
+**Example:**
+
+```bash
+python tools/lcp.py info nano-cris
+# name: nano-cris
+# version: 1.0.0
+# description: Editor de texto simple para CrisOS
+# size: 32000 bytes
+# dependencies: libc, termcap
+# repository: main
+# author: Cristopher
+# license: MIT
+```
+
+---
+
+### `install`
+
+```bash
+python tools/lcp.py install <package> [--force] [--no-deps] [--root <path>]
+```
+
+Installs the named package. Before installing the target, the tool resolves all transitive dependencies in topological order (deepest dependencies first) and installs them too, unless `--no-deps` is set. Installation records the package in `~/.lcp/installed.json` and writes stub files under the install root.
+
+<ParamField path="package" type="string" required>
+  Name of the package to install.
+</ParamField>
+
+<ParamField path="--force" type="flag">
+  Reinstall the package even if it is already recorded as installed. Without
+  this flag, attempting to reinstall exits with code `8`
+  (`EXIT_ALREADY_INSTALLED`).
+</ParamField>
+
+<ParamField path="--no-deps" type="flag">
+  Skip dependency resolution. Only the named package itself is installed.
+  Missing dependencies will not be detected or reported.
+</ParamField>
+
+<ParamField path="--root" type="string">
+  Alternate root directory for installing files. Defaults to the current
+  working directory when omitted. The directory is created if it does not
+  exist.
+</ParamField>
+
+**Exit codes:**
+
+| Code | Condition |
+|------|-----------|
+| 0 | All packages installed successfully |
+| 3 | Package not found in any enabled repo |
+| 4 | One or more dependencies not found in any enabled repo |
+| 5 | File system error while creating package files |
+| 6 | Permission denied while writing to the install root |
+| 8 | Package already installed and `--force` not specified |
+
+**Examples:**
+
+```bash
+# Standard install with dependency resolution
+python tools/lcp.py install nano-cris
+
+# Reinstall, skipping the already-installed check
+python tools/lcp.py install nano-cris --force
+
+# Install without pulling in dependencies
+python tools/lcp.py install editor-lite --no-deps
+
+# Install into a custom sysroot
+python tools/lcp.py install libc --root /tmp/cris-sysroot
+```
+
+---
+
+### `remove`
+
+```bash
+python tools/lcp.py remove <package> [--purge]
+```
+
+Removes an installed package by deleting the files recorded in its manifest and removing its entry from `~/.lcp/installed.json`. Refuses removal if any other currently installed package lists this package as a dependency.
+
+<ParamField path="package" type="string" required>
+  Name of the installed package to remove.
+</ParamField>
+
+<ParamField path="--purge" type="flag">
+  Also delete the package configuration file at `etc/<package>.conf` under the
+  install root, if it exists.
+</ParamField>
+
+**Exit codes:**
+
+| Code | Condition |
+|------|-----------|
+| 0 | Package removed successfully |
+| 3 | Package is not installed |
+| 5 | Another installed package depends on this one, or a file system error occurred |
+| 6 | Permission denied while deleting package files |
+
+**Examples:**
+
+```bash
+python tools/lcp.py remove editor-lite
+python tools/lcp.py remove nano-cris --purge
+```
+
+---
+
+### `update`
+
+```bash
+python tools/lcp.py update
+```
+
+Downloads (or reads, for `file://` URLs) the latest package index for every enabled repository and stores the results in `~/.lcp/cache/<name>.json`. Repositories that fail to fetch are reported individually but do not prevent successful repos from caching.
+
+Returns exit code `0` (`EXIT_SUCCESS`) if all enabled repos updated successfully, or `7` (`EXIT_REPO_DOWN`) if any repo failed.
+
+**Example:**
+
+```bash
+python tools/lcp.py update
+# Updated repos: main
+```
+
+<Note>
+  The default `main` repository is a local `file://` source pointing to
+  `tools/lcp_main_repo.json` in the project tree. No network connection is
+  required for the default setup.
+</Note>
+
+---
+
+### `upgrade`
+
+```bash
+python tools/lcp.py upgrade [package]
+```
+
+Upgrades installed packages to the newest available version found in the enabled repos. Without an argument, all installed packages are checked and any that have a newer version available are upgraded. With an argument, only the specified package is upgraded.
+
+Version comparison splits the version string on `.`, `_`, and `-` and compares each segment numerically (as integers) or lexicographically (as strings).
+
+<ParamField path="package" type="string">
+  Optional. Name of a specific installed package to upgrade. When omitted, all
+  upgradable packages are processed.
+</ParamField>
+
+**Exit codes:**
+
+| Code | Condition |
+|------|-----------|
+| 0 | Upgrade(s) applied, or already up to date |
+| 3 | Specified package is not installed or not found in repos |
+| 5 | File system error during reinstall |
+| 6 | Permission denied |
+
+**Examples:**
+
+```bash
+# Upgrade everything
+python tools/lcp.py upgrade
+
+# Upgrade a specific package
+python tools/lcp.py upgrade libc
+```
+
+---
+
+### `list`
+
+```bash
+python tools/lcp.py list [--installed] [--available] [--upgradable]
+```
+
+Lists packages in one of three views. When no flag is provided, defaults to `--installed` behavior.
+
+<ParamField path="--installed" type="flag">
+  List packages currently recorded in `~/.lcp/installed.json`. This is the
+  default when no flag is given.
+</ParamField>
+
+<ParamField path="--available" type="flag">
+  List all packages present in the cached repository indexes (enabled repos
+  only).
+</ParamField>
+
+<ParamField path="--upgradable" type="flag">
+  List only installed packages for which a newer version is available in the
+  cached repos.
+</ParamField>
+
+**Examples:**
+
+```bash
+python tools/lcp.py list
+python tools/lcp.py list --installed
+python tools/lcp.py list --available
+python tools/lcp.py list --upgradable
+```
+
+---
+
+### `files`
+
+```bash
+python tools/lcp.py files <package>
+```
+
+Lists the paths of all files installed by the package, relative to the install root, as recorded in `~/.lcp/installed.json`. Exits with code `3` if the package is not installed.
+
+<ParamField path="package" type="string" required>
+  Name of an installed package.
+</ParamField>
+
+**Example:**
+
+```bash
+python tools/lcp.py files nano-cris
+# bin/nano-cris
+# share/nano-cris/help.txt
+```
+
+---
+
+### `depends`
+
+```bash
+python tools/lcp.py depends <package>
+```
+
+Lists the direct dependencies of `package`. Checks `~/.lcp/installed.json` first; if the package is not installed, falls back to the cached repo index. Prints `No dependencies.` if the package has none. Exits with code `3` if the package cannot be found in either location.
+
+<ParamField path="package" type="string" required>
+  Name of the package to query (installed or available).
+</ParamField>
+
+**Example:**
+
+```bash
+python tools/lcp.py depends nano-cris
+# libc
+# termcap
+```
+
+---
+
+### `verify`
+
+```bash
+python tools/lcp.py verify <package>
+```
+
+Checks that every file recorded in the installed package's manifest still exists on disk (relative to the current working directory as the install root). Reports any missing files and exits with code `5` (`EXIT_INSTALL_FAIL`) if files are absent. Exits with code `3` if the package is not installed.
+
+<ParamField path="package" type="string" required>
+  Name of an installed package to check.
+</ParamField>
+
+**Example:**
+
+```bash
+python tools/lcp.py verify libc
+# libc is installed and all files are present.
+```
+
+---
+
+### `clean`
+
+```bash
+python tools/lcp.py clean
+```
+
+Deletes all cached repository index files from `~/.lcp/cache/`. Does not modify `~/.lcp/installed.json` or `~/.lcp/repos.json`. Run `update` afterwards to rebuild the cache.
+
+**Example:**
+
+```bash
+python tools/lcp.py clean
+# Cache cleared.
+```
+
+---
+
+## Repository Commands
+
+Repository management is handled through the `repo` subcommand group.
+
+### `repo list`
+
+```bash
+python tools/lcp.py repo list
+```
+
+Prints all configured repositories, one per line, with their URL and current enabled/disabled status.
+
+**Example output:**
+
+```
+main: file:/home/user/cris-os-v2/tools/lcp_main_repo.json (enabled)
+```
+
+---
+
+### `repo add`
+
+```bash
+python tools/lcp.py repo add <name> <url>
+```
+
+Adds a new repository source to `~/.lcp/repos.json`. The repository is enabled by default. Returns exit code `1` (`EXIT_ERROR`) if a repo with the same name already exists.
+
+<ParamField path="name" type="string" required>
+  Short identifier for the repository, e.g. `community`.
+</ParamField>
+
+<ParamField path="url" type="string" required>
+  URL of the JSON index. May be an HTTP/HTTPS URL or a `file:` path.
+</ParamField>
+
+**Examples:**
+
+```bash
+python tools/lcp.py repo add community https://example.com/lcp/community.json
+python tools/lcp.py repo add local file:/home/user/my-repo.json
+```
+
+---
+
+### `repo remove`
+
+```bash
+python tools/lcp.py repo remove <name>
+```
+
+Permanently removes the named repository from `~/.lcp/repos.json`. Returns exit code `3` (`EXIT_NOT_FOUND`) if no repo with that name exists.
+
+<ParamField path="name" type="string" required>
+  Name of the repository to remove.
+</ParamField>
+
+**Example:**
+
+```bash
+python tools/lcp.py repo remove community
+```
+
+---
+
+### `repo enable`
+
+```bash
+python tools/lcp.py repo enable <name>
+```
+
+Sets the named repository's `enabled` flag to `true` in `~/.lcp/repos.json`. Enabled repos are included in `update`, `search`, `install`, and all package queries.
+
+<ParamField path="name" type="string" required>
+  Name of the repository to enable.
+</ParamField>
+
+**Example:**
+
+```bash
+python tools/lcp.py repo enable community
+```
+
+---
+
+### `repo disable`
+
+```bash
+python tools/lcp.py repo disable <name>
+```
+
+Sets the named repository's `enabled` flag to `false`. The entry is retained in `~/.lcp/repos.json` but ignored by all package operations until re-enabled.
+
+<ParamField path="name" type="string" required>
+  Name of the repository to disable.
+</ParamField>
+
+**Example:**
+
+```bash
+python tools/lcp.py repo disable community
+```
+
+---
+
+## In-Kernel LCP vs. Host CLI
+
+<Accordion title="How the in-kernel LCP differs from the host tool">
+
+The in-kernel LCP (`src/lcp.c`) is a fully separate C implementation that runs inside CrisOS v2 at runtime. It is invoked from the shell with `lcp <subcommand>`.
+
+**Key differences:**
+
+| Aspect | Host CLI (`tools/lcp.py`) | In-Kernel (`src/lcp.c`) |
+|--------|--------------------------|-------------------------|
+| Language | Python 3 | C (i386 kernel-mode) |
+| Repo format | JSON (`lcp_main_repo.json`) | `lcp_repo.txt` — custom line-oriented text format |
+| Repo source | HTTP/HTTPS or `file://` | VFS path `lcp_repo.txt`; falls back to compiled-in defaults |
+| Persistence | `~/.lcp/installed.json` on host | In-memory `lcp_package_t` array; state is lost on reboot |
+| Supported subcommands | Full set (see above) | `help`, `search`, `info`, `list`, `install`, `remove`, `update`, `upgrade`, `files`, `depends`, `verify` |
+| `--root` option | Supported | Not applicable |
+| Dependency resolution | Full topological sort | Recursive install of known packages; no version comparison |
+| Exit codes | Detailed (0–9) | Always returns `0`; errors printed to console |
+| Max packages | Unlimited (heap) | 16 (`MAX_PACKAGES`) |
+
+**In-kernel `lcp_repo.txt` format:**
+
+The in-kernel parser reads a plain-text stanza file. Each package is a block of `key: value` lines separated by `---` on its own line:
+
+```
+name: nano-cris
+version: 1.0.0
+description: Simple text editor for CrisOS
+arch: i386
+maintainer: Cristopher
+license: MIT
+dependencies: libc, termcap
+files: bin/nano-cris, share/nano-cris/help.txt
+size: 32000
+repo: main
+---
+name: libc
+version: 1.0.0
+...
+```
+
+If `lcp_repo.txt` is absent from the VFS, the kernel falls back to a compiled-in default set of five packages: `nano-cris`, `editor-lite`, `textpad`, `libc`, and `termcap`.
+
+</Accordion>

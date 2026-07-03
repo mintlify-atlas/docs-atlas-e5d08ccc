@@ -1,0 +1,162 @@
+---
+title: "CrisOS v2 Project Layout and File Organization"
+sidebarTitle: "Project Structure"
+description: "A guide to the CrisOS v2 directory layout, what each folder contains, and how source files map to kernel subsystems."
+---
+
+The CrisOS v2 repository is organized so that each top-level directory has a single, well-defined responsibility: hardware abstraction and kernel logic live in `src/`, driver implementations in `drivers/`, host-side tooling in `tools/`, rootfs content in `rootfs/`, and GRUB bootloader artifacts in `iso/`. Two root-level files — `linker.ld` and `Makefile` — control the memory layout and build system respectively.
+
+## Directory Tree
+
+```text
+cris-os-v2/
+├── boot/          # Multiboot header and start symbol (boot.S)
+├── src/           # Kernel C source and headers
+├── drivers/       # Hardware driver implementations
+├── tools/         # Host-side Python utilities
+├── rootfs/        # Content packed into the CRFS rootfs image
+├── iso/           # GRUB bootloader config and image files
+├── linker.ld      # ELF linker script (loads at 0x00100000)
+└── Makefile       # Build system
+```
+
+## Directory Reference
+
+<Accordion title="boot/ — Multiboot entry point">
+  Contains a single Assembly file, `boot.S`, which is the very first code executed after GRUB hands control to the kernel.
+
+  - Declares the Multiboot magic header (magic `0x1BADB002`, flags `0x00000003`, checksum) in the `.multiboot` section so GRUB can identify and load the image.
+  - Defines the global symbol `start`, which GRUB jumps to at boot.
+  - `start` clears segment registers, sets the stack pointer to `stack_top` (an 8 KiB `.bss` region), aligns the stack to a 16-byte boundary, pushes the Multiboot information structure address in `%ebx`, and calls `kmain`.
+  - If `kmain` ever returns, `start` enters an infinite loop to prevent undefined execution.
+</Accordion>
+
+<Accordion title="src/ — Kernel logic">
+  All kernel C source files and their headers. This directory is passed to the compiler as the include root (`-I src`).
+
+  **C sources compiled into the kernel:**
+
+  | File | Role |
+  |---|---|
+  | `kernel.c` | Entry point `kmain`; orchestrates all subsystem initialization in order and then calls `shell_run`. |
+  | `kstring.c` | Freestanding string utilities (`kstrlen`, `kstreq`, `kstrstr`, `kskip_spaces`, `kitoa`) used throughout the kernel in place of libc. |
+  | `gdt.c` | Sets up the Global Descriptor Table with kernel code and data segments and loads it via `lgdt`. |
+  | `idt.c` | Populates the Interrupt Descriptor Table with ISR stubs for CPU exceptions (0–31) and hardware IRQs (0–15). |
+  | `fs.c` | Low-level CRFS image parser: reads the 16-byte header, builds an in-memory file entry table from the CRFS binary blob delivered as a Multiboot module. |
+  | `vfs.c` | Virtual File System layer: maintains the current working directory, resolves paths, and exposes `vfs_list`, `vfs_cat`, `vfs_read`, `vfs_write`, `vfs_mkdir`, `vfs_touch`, `vfs_remove`, `vfs_cp`, `vfs_mv`, and `vfs_exists` to the shell. |
+  | `shell.c` | Interactive shell loop: reads lines via `keyboard_readline`, tokenizes input, and dispatches to the appropriate subsystem or built-in handler. |
+  | `boot.c` | Boot manager (`boot_init`, `boot_handle_command`) — handles `bootctl` shell commands. |
+  | `systemd.c` | Service manager (`systemd_init`, `systemd_handle_command`) — handles `systemctl` shell commands. |
+  | `lcp.c` | In-kernel LCP package manager (`lcp_init`, `lcp_handle_command`) — parses `lcp_repo.txt` from the VFS and handles `lcp` shell commands. |
+  | `gui.c` | VGA text-mode GUI: renders bordered windows using box-drawing characters written directly to `0xB8000` via `console_putxy`; provides an interactive menu for filesystem browsing and system status. |
+  | `memory.c` | Minimal kernel heap: `kmalloc` and `kfree`. |
+  | `calc.c` | Expression evaluator for the `calc` shell command. |
+  | `calc_app.c` | Shell-facing wrapper `calc_app()` that drives the expression evaluator and prints the result. |
+
+  **Assembly sources:**
+
+  | File | Role |
+  |---|---|
+  | `asm_utils.S` | I/O port helpers (`inb`, `outb`), arithmetic routines (`sub_asm`, `mul_asm`, `div_asm`), VGA helper (`console_putxy`, `memsetw_asm`), CPU control (`halt_cpu`, `reboot_cpu`), ISR/IRQ stubs, and `gdt_load`. |
+  | `math_asm.S` | `add_asm` — addition implemented in x86 Assembly, called during kernel boot as a self-test (`7 + 5 = 12`). |
+</Accordion>
+
+<Accordion title="drivers/ — Hardware drivers">
+  Contains self-contained driver implementations. Each driver is compiled with the same `CFLAGS` as `src/` sources and linked into the kernel binary.
+
+  | File | Subsystem |
+  |---|---|
+  | `console.c` | VGA text-mode console: `console_clear`, `console_print`, `console_putchar`, `console_clear_color`. Writes character/attribute pairs to the VGA framebuffer at physical address `0xB8000`. |
+  | `keyboard.c` | PS/2 keyboard driver: IRQ1 handler, scancode-to-ASCII translation, `keyboard_readline` blocking read, `keyboard_read_char`, and layout switching (`KB_LAYOUT_US`, `KB_LAYOUT_ES`, `KB_LAYOUT_DE`). |
+  | `mouse.c` | PS/2 mouse driver: initializes the mouse via IRQ12, tracks X/Y position and button state accessible through `mouse_get_state`. |
+  | `timer.c` | PIT (Programmable Interval Timer) driver: `timer_init(hz)` programs the 8254 timer chip to generate IRQ0 at the requested frequency (100 Hz at boot). |
+  | `pic.c` | 8259A PIC driver: `pic_init` remaps IRQs 0–7 to vectors 32–39 and IRQs 8–15 to vectors 40–47; `pic_mask` controls which IRQ lines are enabled. |
+</Accordion>
+
+<Accordion title="tools/ — Host-side Python utilities">
+  Python 3 scripts and data files used on the build host. They are never compiled into the kernel.
+
+  | File | Purpose |
+  |---|---|
+  | `build_rootfs.py` | Walks the `rootfs/` directory tree, writes a CRFS-format binary image (4-byte magic `CRFS`, version 1, entry count, per-file records with 64-byte name, offset, and size fields, followed by 4-byte-aligned file data). Invoked as `python tools/build_rootfs.py rootfs iso/boot/rootfs.bin`. |
+  | `lcp.py` | Full-featured host-side package manager CLI with commands: `search`, `info`, `install`, `remove`, `update`, `upgrade`, `list`, `clean`, `files`, `depends`, `verify`, and `repo`. Reads the default package index from `lcp_main_repo.json`. |
+  | `lcp_main_repo.json` | Default LCP package repository index in JSON format, listing packages such as `nano-cris`, `editor-lite`, `textpad`, `libc`, and `termcap` with version, description, dependencies, file paths, and size metadata. |
+</Accordion>
+
+<Accordion title="rootfs/ — Root filesystem content">
+  Plain text files that `tools/build_rootfs.py` packs into the CRFS image (`iso/boot/rootfs.bin`). The kernel mounts this image at boot as a Multiboot module and exposes its contents through the VFS at the root path `/`.
+
+  | File | Content |
+  |---|---|
+  | `README.txt` | Welcome message displayed when the user runs `cat README.txt` from the shell. |
+  | `info.txt` | One-line OS identification string (`MiniOS v0.1`, basic filesystem status). |
+  | `lcp_repo.txt` | Plain-text LCP package listing used by the in-kernel `lcp.c` to resolve package metadata without a JSON parser. Lists `nano-cris`, `editor-lite`, `textpad`, `libc`, and `termcap`. |
+</Accordion>
+
+<Accordion title="iso/ — GRUB bootloader tree">
+  Pre-built GRUB files and the assembled boot image tree. The `make iso` target copies `build/kernel.bin` here; `make echo-iso` feeds this entire directory to `grub-mkrescue`.
+
+  ```text
+  iso/
+  └── boot/
+       ├── grub/
+       │    ├── grub.cfg      # GRUB menu and module load commands
+       │    ├── core.img      # Pre-built GRUB core image
+       │    ├── eltorito.img  # El Torito boot catalog image
+       │    └── theme.txt     # GRUB menu theme configuration
+       ├── kernel.bin         # Copied from build/ by make iso
+       └── rootfs.bin         # Generated by tools/build_rootfs.py
+  ```
+</Accordion>
+
+<Accordion title="linker.ld — ELF linker script">
+  Controls the memory layout of the final kernel binary. The kernel is loaded at the 1 MiB physical boundary, which is the conventional load address for Multiboot kernels and keeps the binary above BIOS data areas.
+
+  ```text
+  OUTPUT_FORMAT("elf32-i386")
+  ENTRY(start)
+  SECTIONS
+  {
+    . = 0x00100000;
+    .multiboot : { *(.multiboot) }   /* Multiboot header — must come first */
+    .text      : { *(.text*)      }  /* Executable code */
+    .rodata    : { *(.rodata*)    }  /* Read-only data */
+    .data      : { *(.data*)      }  /* Initialized data */
+    .bss       : { *(.bss*) *(COMMON) } /* Zero-initialized data + stack */
+  }
+  ```
+
+  Placing `.multiboot` at the very start of the image guarantees that GRUB finds the magic number within the first 8 KiB of the file, as required by the Multiboot specification.
+</Accordion>
+
+## Source File to Subsystem Mapping
+
+| File | Subsystem |
+|---|---|
+| `boot/boot.S` | Multiboot header, protected-mode entry, stack setup |
+| `src/kernel.c` | Kernel main (`kmain`), boot sequence orchestration |
+| `src/gdt.c` / `gdt.h` | Global Descriptor Table |
+| `src/idt.c` / `idt.h` | Interrupt Descriptor Table |
+| `src/fs.c` / `fs.h` | CRFS raw image parser |
+| `src/vfs.c` / `vfs.h` | Virtual File System abstraction layer |
+| `src/shell.c` / `shell.h` | Interactive shell and command dispatch |
+| `src/memory.c` / `memory.h` | Kernel heap (`kmalloc` / `kfree`) |
+| `src/lcp.c` / `lcp.h` | In-kernel LCP package manager |
+| `src/systemd.c` / `systemd.h` | Service manager |
+| `src/boot.c` / `boot.h` | Boot manager / `bootctl` |
+| `src/gui.c` / `gui.h` | VGA text-mode GUI |
+| `src/calc.c` / `calc.h` | Expression evaluator |
+| `src/calc_app.c` / `calc_app.h` | Shell-facing `calc` command wrapper |
+| `src/kstring.c` / `kstring.h` | Freestanding string utilities |
+| `src/asm_utils.S` / `asm.h` | I/O ports, arithmetic, ISR/IRQ stubs, CPU control |
+| `src/math_asm.S` | `add_asm` — Assembly addition routine |
+| `drivers/console.c` / `src/console.h` | VGA text-mode console output |
+| `drivers/keyboard.c` / `src/keyboard.h` | PS/2 keyboard driver and layout support |
+| `drivers/mouse.c` / `src/mouse.h` | PS/2 mouse driver |
+| `drivers/timer.c` / `src/timer.h` | PIT timer driver (IRQ0, 100 Hz) |
+| `drivers/pic.c` / `src/pic.h` | 8259A PIC initialization and IRQ masking |
+| `tools/build_rootfs.py` | Host tool: pack `rootfs/` into CRFS binary |
+| `tools/lcp.py` | Host tool: full LCP package manager CLI |
+| `tools/lcp_main_repo.json` | Default LCP package repository index |
+| `linker.ld` | ELF memory layout, kernel load address `0x00100000` |
+| `Makefile` | Build system: all targets and compiler flags |

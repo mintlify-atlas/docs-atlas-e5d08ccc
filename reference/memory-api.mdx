@@ -1,0 +1,133 @@
+---
+title: "CrisOS v2 Kernel Memory Allocator API"
+sidebarTitle: "Memory API"
+description: "Reference for kmalloc and kfree in CrisOS v2 — a simple bump allocator backed by a 64 KB static array with 4-byte alignment and no deallocation."
+---
+
+`memory.h` declares `kmalloc` and `kfree`, the two memory allocation functions available to CrisOS v2 kernel code. The implementation is a bump allocator: a single `heap_used` offset advances monotonically through a 64 KB static array on each allocation, and `kfree` is intentionally a no-op. This design prioritises simplicity and correctness in an educational kernel over the generality of a free list or slab allocator.
+
+---
+
+## Functions
+
+### `kmalloc`
+
+```c
+void *kmalloc(size_t size);
+```
+
+Allocates `size` bytes from the static kernel heap. Before advancing the heap pointer the requested size is rounded up to the nearest 4-byte boundary:
+
+```c
+size = (size + 3) & ~3;
+```
+
+This ensures every returned pointer is 4-byte aligned, which satisfies alignment requirements for `int`, `uint32_t`, and pointer-sized types on i386.
+
+The full implementation:
+
+```c
+static unsigned char heap_area[64 * 1024];
+static size_t heap_used = 0;
+
+void *kmalloc(size_t size) {
+    if (size == 0) return 0;
+    size = (size + 3) & ~3;
+    if (heap_used + size > sizeof(heap_area)) return 0;
+    void *p = &heap_area[heap_used];
+    heap_used += size;
+    return p;
+}
+```
+
+<ParamField path="size" type="size_t" required>
+  Number of bytes to allocate. If `0`, `kmalloc` returns `NULL` immediately without advancing the heap pointer.
+</ParamField>
+
+**Returns:** A pointer to the start of the allocated block, guaranteed to be 4-byte aligned; or `NULL` if `size` is `0` or the heap has insufficient remaining capacity.
+
+<Warning>
+  Always check the return value of `kmalloc` for `NULL`. If the 64 KB heap is exhausted, every subsequent call returns `NULL`. Passing a NULL pointer to kernel subsystems without checking will cause a fault or silent data corruption.
+</Warning>
+
+---
+
+### `kfree`
+
+```c
+void kfree(void *p);
+```
+
+Accepts any pointer (including `NULL`) and performs no operation. The bump allocator has no free list, so memory cannot be reclaimed once allocated.
+
+The complete implementation:
+
+```c
+void kfree(void *p) {
+    (void)p;
+}
+```
+
+<ParamField path="p" type="void *" required>
+  Pointer to free. Any value is accepted; the argument is immediately discarded.
+</ParamField>
+
+**Returns:** Nothing (`void`).
+
+<Note>
+  Calling `kfree` is always safe — it will never crash, corrupt state, or double-free. However, it also never has any effect. Memory released with `kfree` is not available for future `kmalloc` calls.
+</Note>
+
+---
+
+## Heap Layout
+
+| Property          | Value                             |
+|-------------------|-----------------------------------|
+| Backing store     | `static unsigned char heap_area[64 * 1024]` |
+| Total capacity    | 65 536 bytes (64 KB)              |
+| Alignment         | 4 bytes per allocation            |
+| Allocation policy | Bump (monotonic pointer advance)  |
+| Deallocation      | No-op                             |
+| Thread safety     | None (single-core kernel)         |
+
+The `heap_area` array is placed in the kernel's BSS segment (zero-initialised at load time). The 64 KB size is chosen to fit comfortably in the first megabyte of physical memory alongside the kernel code, BSS, kernel stack, and the VGA text buffer at `0xB8000`.
+
+---
+
+## Design Rationale
+
+**Why a bump allocator?** CrisOS v2 is an educational operating system. A bump allocator is the simplest possible allocator: no metadata headers, no free list traversal, no use-after-free or double-free bugs, and no fragmentation in the traditional sense. Every allocation is a pointer increment and a bounds check — two instructions and a branch.
+
+**Limitations.** Because `kfree` is a no-op, heap consumption is strictly monotonic. Any subsystem that allocates memory in a loop — for example, allocating a buffer per command in the shell — will exhaust the heap over time. The kernel does not currently reallocate or resize any subsystem's buffers after boot, so in practice heap usage remains bounded.
+
+**Why 64 KB?** The i386 real-mode address space below 1 MB is tightly partitioned. 64 KB gives the kernel enough room to build the VFS node tree, allocate console buffers, and satisfy ad-hoc `kmalloc` calls from kernel subsystems while leaving the lower region free for the GDT, IDT, stack, and BIOS data. A more complex OS would implement a physical page frame allocator on top of an E820 memory map; CrisOS v2 uses the static array for simplicity.
+
+---
+
+## Usage Example
+
+```c
+#include "memory.h"
+#include "console.h"
+
+void example(void) {
+    char *buf = (char *)kmalloc(128);
+    if (!buf) {
+        console_print("Out of memory\n");
+        return;
+    }
+
+    /* use buf for some kernel operation */
+    buf[0] = 'H';
+    buf[1] = 'i';
+    buf[2] = '\0';
+    console_print(buf);
+
+    kfree(buf); /* no-op: buf is not actually freed */
+}
+```
+
+<Tip>
+  Because `kfree` is a no-op, you can safely omit the call in performance-critical paths. Keeping `kfree` calls in the source code is still recommended for readability and to ease a future migration to a real allocator.
+</Tip>

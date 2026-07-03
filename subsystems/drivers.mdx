@@ -1,0 +1,271 @@
+---
+title: "CrisOS v2 Hardware Drivers: Console, Keyboard, Mouse, Timer, PIC"
+sidebarTitle: "Drivers"
+description: "Reference for CrisOS v2's hardware drivers: VGA text console, PS/2 keyboard with layout support, PS/2 mouse, 8253 PIT timer, and 8259 PIC."
+---
+
+CrisOS v2 includes five hardware drivers implemented in `drivers/`. Each driver communicates directly with hardware through I/O ports using the `inb` and `outb` assembly routines — there is no hardware abstraction layer or driver framework between the C code and the physical bus. The PIC driver is initialized first to set up interrupt vector offsets; the remaining drivers build on that foundation.
+
+---
+
+## Driver Reference
+
+<Accordion title="Console Driver — drivers/console.c">
+
+The console driver implements a scrolling VGA text-mode display. It writes directly to the memory-mapped VGA text buffer and provides the `console_print` / `console_putchar` primitives used by every other kernel subsystem.
+
+### Hardware Parameters
+
+| Constant | Value | Description |
+|---|---|---|
+| `VGA` | `0xB8000` | Base address of the VGA text buffer |
+| `VGA_COLS` | `80` | Columns per row |
+| `VGA_ROWS` | `25` | Total rows |
+
+Each cell in the buffer is a 16-bit value: the low byte is the ASCII character code and the high byte is the attribute (foreground/background color). The default attribute is `0x07` (light grey on black).
+
+### Public API
+
+```c
+void console_putchar(char c);
+void console_print(const char *s);
+void console_clear(void);
+void console_clear_color(unsigned char attr);
+void console_putxy(int x, int y, char c, unsigned char attr);
+void kernel_panic(const char *message);
+```
+
+**`console_putchar(char c)`** — The core output primitive. Behavior depends on the character value:
+
+| Character | Action |
+|---|---|
+| `'\n'` | `cursor_x = 0; cursor_y++` |
+| `'\r'` | `cursor_x = 0` |
+| `'\b'` | Decrement `cursor_x` if `> 0`; overwrite the vacated cell with a space |
+| Printable (`>= ' '`) | Write to `VGA[cursor_y * 80 + cursor_x]` with attribute `0x07`; advance `cursor_x` |
+
+After every character, `scroll_if_needed()` is called. If `cursor_y >= VGA_ROWS`, every row is shifted up by one position (rows `1…24` are copied to `0…23`), `cursor_y` is reset to `VGA_ROWS - 1`, and the last row is cleared to blank space with attribute `0x07`.
+
+**`console_print(const char *s)`** — Calls `console_putchar()` for every byte until `'\0'`.
+
+**`console_clear()`** — Calls `console_clear_color(0x07)` to fill the screen with spaces using the default light-grey-on-black attribute.
+
+**`console_clear_color(unsigned char attr)`** — Fills all `80 × 25 = 2000` cells via `memsetw_asm()` with a 16-bit word formed as `' ' | (attr << 8)`. Resets `cursor_x` and `cursor_y` to `0`.
+
+**`kernel_panic(const char *message)`** — Clears the screen with attribute `0x4F` (white on red), prints `"KERNEL PANIC\n\n"` followed by `message`, then waits for a key press via `keyboard_read_char()` before halting the CPU with `halt_cpu()`.
+
+</Accordion>
+
+<Accordion title="Keyboard Driver — drivers/keyboard.c">
+
+The keyboard driver polls the PS/2 port 0x60 for scan codes, translates them using one of three switchable layouts, and provides both single-character and line-buffered input.
+
+### Hardware Ports
+
+| Port | Direction | Purpose |
+|---|---|---|
+| `0x60` | Read | PS/2 data register (scan code) |
+| `0x64` | Read | PS/2 status register (bit 0 = output buffer full) |
+
+### Public API
+
+```c
+void keyboard_init(void);
+char keyboard_read_char(void);
+int  keyboard_readline(char *buf, int maxlen);
+int  keyboard_set_layout(int layout);
+int  keyboard_get_layout(void);
+void keyboard_flush(void);
+```
+
+**`keyboard_init()`** — Resets all modifier state (`shift_state`, `caps_lock`, `ctrl_state`, `alt_state`, `extended_code`) to `false`, sets `current_layout = KB_LAYOUT_US`, and calls the internal `layout_populate()` to copy the three layout tables into the mutable `layouts[]` array.
+
+**`keyboard_read_char()`** — Busy-waits on port `0x64` until bit 0 is set, then reads a scan code from port `0x60`.
+- If the scan code is `0xE0`, `extended_code` is set and the function loops to read the next byte.
+- Key-release events (bit 7 set) update modifier state (`shift_state`, `ctrl_state`, `alt_state`) and return `0`.
+- Key-press events: modifier keys update state and return `0`; regular keys are translated through the active layout table (`lay->normal[sc]` or `lay->shifted[sc]`) and then passed through `normalize_key()` for Caps Lock handling.
+
+**`keyboard_readline(char *buf, int maxlen)`** — Calls `keyboard_read_char()` in a loop, echoing each character to the console via `console_putchar()`. Returns when Enter (`'\n'`) is pressed. Backspace decrements the position and erases the last character on screen. The buffer is null-terminated. Returns the number of characters read.
+
+### Keyboard Layouts
+
+Three layouts are built into the driver. Switch with `keyboard_set_layout(id)`:
+
+| Constant | Value | Language | Arrangement |
+|---|---|---|---|
+| `KB_LAYOUT_US` | `0` | English | QWERTY |
+| `KB_LAYOUT_ES` | `1` | Spanish | QWERTY |
+| `KB_LAYOUT_DE` | `2` | German | QWERTZ |
+
+Each layout has a `normal[128]` and `shifted[128]` scan-code-to-ASCII table. Caps Lock XORs with the shift state for alphabetic keys only.
+
+**`keyboard_flush()`** — Drains any pending bytes from port `0x60` by reading while bit 0 of `0x64` is set. Also resets `shift_state` and `extended_code`.
+
+</Accordion>
+
+<Accordion title="Mouse Driver — drivers/mouse.c">
+
+The mouse driver manages a PS/2 mouse on IRQ12. It accumulates three-byte packets from the PS/2 controller and updates a module-level `mouse_state` struct with absolute screen coordinates clamped to the VGA text grid.
+
+### Hardware Ports
+
+| Port | Direction | Purpose |
+|---|---|---|
+| `0x60` | Read/Write | PS/2 data register |
+| `0x64` | Read/Write | PS/2 command/status register |
+
+### State Structure
+
+```c
+struct mouse_state {
+    int           x;        /* column, 0–79    */
+    int           y;        /* row, 0–24       */
+    unsigned char buttons;  /* bitmask: bit 0 = left, bit 1 = right, bit 2 = middle */
+    int           delta_x;  /* last X movement */
+    int           delta_y;  /* last Y movement */
+};
+```
+
+### Public API
+
+```c
+void mouse_init(void);
+void mouse_handler(void);
+void mouse_get_state(struct mouse_state *state);
+```
+
+**`mouse_init()`** — Initializes the state with `x = 40, y = 12` (screen center) and configures the PS/2 controller:
+
+1. Sends command `0xA8` to port `0x64` to enable the auxiliary (mouse) device.
+2. Reads the current command byte (`0x20`), sets bit 1 to enable IRQ12, and writes it back (`0x60`).
+3. Sends `0xF6` (set default settings) and `0xF4` (enable mouse data reporting) via the mouse write sequence (command `0xD4` to port `0x64`, data to port `0x60`).
+
+**`mouse_handler()`** — Called from the IRQ12 handler. Reads one byte from port `0x60` into a 3-byte ring buffer `pkt_buf[]`. When all three bytes are collected:
+- `buttons = pkt_buf[0] & 7`
+- `dx = (int)(char)pkt_buf[1]`
+- `dy = -(int)(char)pkt_buf[2]` (Y axis is inverted)
+- `x` and `y` are updated and clamped to `[0, 79]` and `[0, 24]` respectively.
+
+**`mouse_get_state(struct mouse_state *state)`** — Copies the internal `mstate` into the caller's struct. Used by the shell `mouse` command to print current position and button state.
+
+</Accordion>
+
+<Accordion title="PIT Timer Driver — drivers/timer.c">
+
+The timer driver programs channel 0 of the Intel 8253/8254 Programmable Interval Timer (PIT) to generate periodic ticks at a configurable frequency.
+
+### Hardware Ports
+
+| Port | Direction | Purpose |
+|---|---|---|
+| `0x43` | Write | PIT mode/command register |
+| `0x40` | Write | Channel 0 data (divisor, low byte then high byte) |
+
+### Public API
+
+```c
+void          timer_init(unsigned int frequency);
+unsigned long timer_get_ticks(void);
+void          timer_sleep(unsigned long ticks);
+void          timer_handler(void);
+```
+
+**`timer_init(unsigned int frequency)`** — Resets the tick counter to `0` and programs the PIT:
+
+```c
+unsigned int divisor = 1193180 / frequency;
+outb(0x43, 0x36);                          /* channel 0, lobyte/hibyte, rate generator */
+outb(0x40, (unsigned char)(divisor & 0xFF));
+outb(0x40, (unsigned char)((divisor >> 8) & 0xFF));
+```
+
+The PIT input clock is `1,193,180 Hz`. A call to `timer_init(100)` sets `divisor = 11931`, yielding a tick interval of approximately 10 ms (100 Hz).
+
+**`timer_get_ticks()`** — Returns the current value of the `volatile unsigned long timer_ticks` counter.
+
+**`timer_handler()`** — Increments `timer_ticks` by 1. Must be wired to the IRQ0 interrupt handler in the IDT to count ticks automatically.
+
+**`timer_sleep(unsigned long ticks)`** — Busy-waits until `timer_ticks >= target` using `hlt` to yield the CPU between checks:
+
+```c
+void timer_sleep(unsigned long ticks) {
+    unsigned long target = timer_ticks + ticks;
+    while (timer_ticks < target)
+        asm volatile("hlt");
+}
+```
+
+</Accordion>
+
+<Accordion title="PIC Driver — drivers/pic.c">
+
+The PIC driver remaps the two 8259A Programmable Interrupt Controllers so that hardware IRQs do not overlap with the CPU's reserved exception vectors (0x00–0x1F).
+
+### Hardware Ports
+
+| Controller | Command port | Data port | Post-remap vectors |
+|---|---|---|---|
+| Master 8259A | `0x20` | `0x21` | IRQ 0–7 → INT `0x20`–`0x27` |
+| Slave 8259A | `0xA0` | `0xA1` | IRQ 8–15 → INT `0x28`–`0x2F` |
+
+### Public API
+
+```c
+void pic_init(void);
+void pic_mask(unsigned char mask_master, unsigned char mask_slave);
+void pic_eoi(unsigned char irq);
+```
+
+**`pic_init()`** — Saves the current IMR (Interrupt Mask Register) values from both data ports, then sends the standard ICW1–ICW4 initialization sequence:
+
+```c
+/* ICW1: initialize, ICW4 required */
+outb(0x20, ICW1_INIT | ICW1_ICW4);   /* 0x11 */
+outb(0xA0, ICW1_INIT | ICW1_ICW4);
+
+/* ICW2: vector offsets */
+outb(0x21, 0x20);   /* master: IRQ0 → INT 0x20 */
+outb(0xA1, 0x28);   /* slave:  IRQ8 → INT 0x28 */
+
+/* ICW3: cascade wiring */
+outb(0x21, 4);      /* master has slave on IRQ2 */
+outb(0xA1, 2);      /* slave cascade identity   */
+
+/* ICW4: 8086 mode */
+outb(0x21, ICW4_8086);   /* 0x01 */
+outb(0xA1, ICW4_8086);
+
+/* restore saved IMR */
+outb(0x21, m1);
+outb(0xA1, m2);
+```
+
+**`pic_mask(unsigned char mask_master, unsigned char mask_slave)`** — Writes the IMR bytes directly to ports `0x21` and `0xA1`. Each bit position corresponds to an IRQ line; `1` masks (disables) the interrupt, `0` enables it.
+
+```c
+/* Enable IRQ1 (keyboard) only on master, disable all on slave */
+pic_mask(0b11111101, 0b11111111);
+```
+
+**`pic_eoi(unsigned char irq)`** — Sends an End of Interrupt command (`0x20`) to the master PIC. If `irq >= 8`, the command is also sent to the slave PIC first.
+
+</Accordion>
+
+---
+
+## I/O Port Quick Reference
+
+| Port | Device | Used for |
+|---|---|---|
+| `0x20` | Master PIC — command | ICW1 init, EOI (`0x20`) |
+| `0x21` | Master PIC — data | ICW2/3/4, IMR read/write |
+| `0x40` | PIT channel 0 data | Divisor low/high byte |
+| `0x43` | PIT command | Mode/frequency programming |
+| `0x60` | PS/2 data | Keyboard scan codes, mouse data/commands |
+| `0x64` | PS/2 status/command | Status read, controller commands |
+| `0xA0` | Slave PIC — command | ICW1 init, EOI |
+| `0xA1` | Slave PIC — data | ICW2/3/4, IMR read/write |
+
+<Warning>
+These drivers use direct port I/O via `inb`/`outb` assembly instructions. Running CrisOS v2 on real hardware requires a genuine i386/i486-compatible machine or an accurate emulator. QEMU (`-machine pc -cpu 486`) is the recommended and tested environment. Attempting to run under a hypervisor that does not accurately emulate PS/2 controllers or the 8259A PIC may result in silent failures during keyboard or mouse initialization.
+</Warning>

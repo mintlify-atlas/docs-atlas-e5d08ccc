@@ -1,0 +1,129 @@
+---
+title: "CrisOS v2 Boot Process: Multiboot to Kernel Entry"
+sidebarTitle: "Boot Process"
+description: "How CrisOS v2 boots via GRUB Multiboot: assembly entry point, stack setup, protected mode entry, and the handoff to kmain."
+---
+
+GRUB loads the CrisOS v2 kernel ELF at physical address `0x00100000` (the 1 MB mark), validates the embedded Multiboot header, and transfers control to the `start` symbol defined in `boot/boot.S`. From that moment the CPU is already in 32-bit protected mode, and the assembly entry point is responsible for establishing a clean execution environment before calling the C kernel entry point `kmain`.
+
+## GRUB Configuration
+
+The ISO image ships with the following GRUB configuration. The single `multiboot` line loads the kernel binary and passes the rootfs image as a Multiboot module — both are picked up by GRUB before any kernel code runs.
+
+```text
+set timeout=1
+set default=0
+set gfxmode=640x480
+set gfxpayload=keep
+terminal_output gfxterm
+set menu_color_normal=white/black
+set menu_color_highlight=black/light-gray
+if [ -e "/boot/grub/theme.txt" ]; then
+  set theme="/boot/grub/theme.txt"
+fi
+
+menuentry "MiniOS (C++/ASM)" {
+  multiboot /boot/kernel.bin /boot/rootfs.bin
+  boot
+}
+```
+
+## Multiboot Header
+
+The very first section of the kernel image is `.multiboot`, placed at address `0x00100000` by the linker script. It contains three 32-bit magic numbers that GRUB scans for to identify a compliant kernel:
+
+```asm
+.section .multiboot
+.align 4
+.long 0x1BADB002          /* magic number */
+.long 0x00000003          /* flags        */
+.long -(0x1BADB002 + 0x00000003)  /* checksum     */
+```
+
+The three fields must satisfy `magic + flags + checksum == 0 (mod 2^32)`. GRUB verifies this sum before handing off control. The flags value `0x00000003` is a bitmask: bit 0 requests that all boot modules are loaded on page-aligned boundaries, and bit 1 requests that the bootloader populate a memory map in the Multiboot information structure passed to the kernel.
+
+<Note>
+The Multiboot flags value `0x00000003` is the bitwise OR of two requests: **bit 0** (`0x1`) — page-align all loaded modules; **bit 1** (`0x2`) — provide a BIOS memory map. Both bits are required by CrisOS v2 to locate and mount the rootfs module reliably.
+</Note>
+
+## Boot Sequence
+
+<Steps>
+  <Step title="GRUB validates the Multiboot header">
+    GRUB scans the first 8 KB of the kernel image for the magic value `0x1BADB002`. Once found it verifies that `magic + flags + checksum == 0`. On success, GRUB loads all modules specified on the `multiboot` line, builds the `multiboot_info` structure in memory, and prepares to transfer control.
+  </Step>
+  <Step title="CPU enters 32-bit protected mode">
+    GRUB switches the CPU from real mode into 32-bit protected mode before jumping to the kernel entry point. Segment registers are left in their GRUB-initialized state; CrisOS v2 will re-initialize them with a proper GDT shortly after `kmain` is entered.
+  </Step>
+  <Step title="Assembly entry point `start` runs">
+    Control arrives at the `start` label in `boot/boot.S`. The assembly stub performs five critical actions in order:
+
+    1. **`cli`** — disables hardware interrupts so no IRQ can fire before the IDT is installed.
+    2. **Clear segment registers** — zeroes `%ds`, `%es`, `%fs`, and `%gs` to avoid stale GRUB values interfering with memory accesses.
+    3. **Set up the stack** — loads `$stack_top` into `%esp` and 16-byte-aligns the stack pointer with `and $-16, %esp`. The stack is an 8 KB `.bss` region (`.lcomm stack, 8192`); `stack_top` is the symbol `stack + 8192`.
+    4. **Push the Multiboot info pointer** — `push %ebx` passes the pointer to the `multiboot_info` structure (placed there by GRUB in `%ebx`) as the first argument to `kmain`.
+    5. **Call `kmain`** — transfers control to the C kernel entry point.
+  </Step>
+  <Step title="kmain receives the Multiboot info pointer">
+    `kmain(unsigned long mbi_addr)` receives the physical address of the Multiboot information structure as its sole argument. It uses this to locate loaded modules (e.g. the rootfs image) by checking `mbi->flags & 0x8` and iterating `mbi->mods_addr`. The full initialization sequence is described in the [Kernel](/architecture/kernel) page.
+  </Step>
+</Steps>
+
+## Linker Script and Memory Layout
+
+The linker script `linker.ld` produces a flat 32-bit ELF image loaded starting at `0x00100000`:
+
+```text
+OUTPUT_FORMAT("elf32-i386")
+ENTRY(start)
+SECTIONS
+{
+  . = 0x00100000;
+  .multiboot : { *(.multiboot) }
+  .text      : { *(.text*)    }
+  .rodata    : { *(.rodata*)  }
+  .data      : { *(.data*)    }
+  .bss       : { *(.bss*) *(COMMON) }
+}
+```
+
+Sections are placed in the following order:
+
+| Section | Contents |
+|---|---|
+| `.multiboot` | Multiboot header (three magic longwords) |
+| `.text` | All executable code |
+| `.rodata` | Read-only data (string literals, lookup tables) |
+| `.data` | Initialized global/static variables |
+| `.bss` | Zero-initialized data, stack (`8192` bytes), bump heap |
+
+## Full `boot.S` Source
+
+```asm
+.section .multiboot
+.align 4
+.long 0x1BADB002
+.long 0x00000003
+.long -(0x1BADB002 + 0x00000003)
+
+.global start
+.type start, @function
+start:
+    cli
+    xor %ax, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+    mov $stack_top, %esp
+    and $-16, %esp
+    push %ebx
+    call kmain
+    add $4, %esp
+1:  jmp 1b
+
+.section .bss
+.align 16
+.lcomm stack, 8192
+.set stack_top, stack + 8192
+```

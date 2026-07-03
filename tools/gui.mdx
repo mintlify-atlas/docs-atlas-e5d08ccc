@@ -1,0 +1,234 @@
+---
+title: "CrisOS v2 GUI, Calculator, and Boot Manager"
+sidebarTitle: "GUI & Extras"
+description: "CrisOS v2 includes a VGA text-mode GUI overlay, an arithmetic expression calculator, and a boot manager — all accessible as shell commands."
+---
+
+Beyond the core shell, CrisOS v2 ships three additional interactive tools: a VGA text-mode GUI (`gui`), an expression calculator (`calc`), and a boot manager (`bootctl`). Each is invokable as a shell command and is implemented entirely in kernel-space C — no userland processes, no system calls, no separate address space. A fourth command, `asm`, exposes the four x86 assembly arithmetic routines compiled into the kernel.
+
+---
+
+## GUI — VGA text-mode overlay
+
+Typing `gui` at the shell prompt calls `gui_show()` in `src/gui.c`. The function clears the screen with a blue background (VGA attribute `0x1F`) and draws a bordered window using IBM CP437 box-drawing characters written directly into the VGA framebuffer at `0xB8000`.
+
+### VGA attribute byte
+
+Each character cell in VGA text mode is a 16-bit word: the low byte is the character, and the high byte is the **attribute**. The attribute byte encodes:
+
+| Bits | Field | Example |
+|---|---|---|
+| 7–4 (high nibble) | Background color | `0x1_` = blue background |
+| 3–0 (low nibble) | Foreground color | `0x_F` = bright white foreground |
+
+For example, `0x1F` is bright white text on a blue background — the default color used throughout the GUI. `0x17` (used for the frame border) is white text on a blue background without the bright flag.
+
+### Drawing functions
+
+All rendering goes through three low-level helpers (implemented in `src/asm_utils.S` via `console_putxy`):
+
+| Function | Signature | Description |
+|---|---|---|
+| `gui_draw_box` | `gui_draw_box(int x, int y, int w, int h, unsigned char attr)` | Fills a rectangle with spaces using the given attribute — effectively a colored background block |
+| `gui_draw_frame` | `gui_draw_frame(int x, int y, int w, int h, unsigned char attr)` | Draws a double-line border using CP437 box characters (`0xCD` horizontal, `0xBA` vertical, `0xC9`/`0xBB`/`0xC8`/`0xBC` corners) |
+| `gui_draw_text` | `gui_draw_text(int x, int y, const char *text, unsigned char attr)` | Writes a string left-to-right starting at column `x`, row `y` |
+| `gui_show` | `gui_show(void)` | Draws the full GUI window and enters the interactive key-dispatch loop |
+
+The main window is positioned at `x=5, y=3` with `w=70, h=18`, giving a comfortable 68-column × 16-row interior working area.
+
+### Menu options
+
+After drawing the window, `gui_show()` renders three rows of menu labels and enters a blocking `keyboard_read_char()` loop. Each keypress dispatches to a sub-screen or shell action:
+
+| Key | Action |
+|---|---|
+| `S` | Exit the GUI and return to the shell prompt |
+| `F` | Filesystem view — shows the current VFS path (`vfs_pwd()`) and lists directory contents via `vfs_list(".")` |
+| `M` | System status screen — displays kernel mode, command style, VFS type, and service manager status |
+| `C` | Redirects to shell: `mkdir <path>` creates directories |
+| `T` | Redirects to shell: `touch <path>` creates files |
+| `D` | Redirects to shell: `rm <path>` deletes files |
+| `R` | Redirects to shell: `cat <file>` reads file contents |
+| `G` | Redirects to shell: `grep <pattern> <file>` searches files |
+| `U` | Unmount notice — instructs the user to use `cd /` or reboot |
+| `Q` | Clears the screen and exits the GUI |
+
+### System status screen
+
+Pressing `M` draws a fresh blue window with the following fixed status lines drawn by `gui_draw_status()`:
+
+```text
+Kernel: CrisOS i386 en modo protegido
+Comandos: modo texto Linux-like con VFS
+Sistema de archivos: virtual CRFS con soporte Linux
+Servicios: systemd-like y bootctl integrados
+```
+
+Press any key to return to the main GUI menu.
+
+<Tip>
+  The GUI is entirely stateless — pressing `Q` or `S` simply clears the screen and returns execution to the caller. You can re-enter the GUI at any time by typing `gui` again.
+</Tip>
+
+---
+
+## calc — arithmetic expression evaluator
+
+The `calc` command evaluates an arithmetic expression string and prints the result. The evaluator is implemented as a recursive descent parser in `src/calc.c`, and the shell command wrapper is in `src/calc_app.c`.
+
+### Function signature
+
+```c
+long calc_eval(const char *s);
+```
+
+`calc_eval` takes a null-terminated expression string and returns a `long` integer result. The expression pointer is a module-level static (`expr_ptr`), making the parser non-reentrant but adequate for single-threaded kernel use.
+
+### Supported syntax
+
+| Feature | Example | Result |
+|---|---|---|
+| Integer literals | `42` | `42` |
+| Unary minus | `-7` | `-7` |
+| Addition | `3 + 4` | `7` |
+| Subtraction | `10 - 3` | `7` |
+| Multiplication | `6 * 7` | `42` |
+| Integer division | `10 / 3` | `3` |
+| Parentheses | `3 * (4 + 2)` | `18` |
+| Nested parentheses | `(2 + 3) * (1 + 1)` | `10` |
+
+Division by zero returns `0` without a fault.
+
+### Shell usage
+
+```text
+CrisOS> calc 3 * (4 + 2)
+Result: 18
+
+CrisOS> calc 100 / 7
+Result: 14
+
+CrisOS> calc -5 + 20
+Result: 15
+```
+
+The `calc_app()` wrapper prints `Usage: calc <expression>` if no expression is given, then calls `calc_eval()` and prints `Result: <value>` via `console_print`.
+
+<Note>
+  The CrisOS shell preprocesses command-line input and replaces `=` characters with `+` before dispatching. Write expressions using `+` for addition directly. Do not use `=` as an operator in calc expressions.
+</Note>
+
+---
+
+## bootctl — boot unit manager
+
+`bootctl` is the shell interface to `src/boot.c`, CrisOS v2's systemd-inspired boot manager. Boot units are `.boot` files stored under `boot/` in the CRFS rootfs; `boot_init()` scans for them at kernel startup.
+
+### Initialization
+
+```c
+int boot_init(void);
+```
+
+Called once during kernel startup. Iterates over every file in the VFS whose path begins with `boot/`, and for each file whose name ends with `.boot`, parses the unit descriptor. Fields recognized by the parser:
+
+| Field | Description |
+|---|---|
+| `Description=` | Human-readable unit description |
+| `ExecStart=` | Command string to execute when the unit starts |
+| `WantedBy=boot.target` | If present, the unit is auto-started during `boot_init()` |
+
+Lines starting with `[` are treated as section headers and ignored. Up to **16 boot units** can be registered simultaneously.
+
+### Command dispatch
+
+```c
+int boot_handle_command(const char *args);
+```
+
+Parses the first whitespace-delimited token from `args` as a subcommand and dispatches accordingly.
+
+### Subcommands
+
+<CodeGroup>
+
+```text list-units
+CrisOS> bootctl list-units
+hello.boot [inactive] - Example hello boot unit
+```
+
+```text status
+CrisOS> bootctl status hello.boot
+hello.boot [inactive] - Example hello boot unit
+```
+
+```text start
+CrisOS> bootctl start hello.boot
+Boot: starting hello.boot
+  ExecStart: /bin/hello
+```
+
+```text stop
+CrisOS> bootctl stop hello.boot
+Boot: stopped hello.boot
+```
+
+```text help
+CrisOS> bootctl help
+bootctl commands:
+  bootctl list-units
+  bootctl status <unit>
+  bootctl start <unit>
+  bootctl stop <unit>
+```
+
+</CodeGroup>
+
+| Subcommand | Description |
+|---|---|
+| `list-units` | Print all registered boot units with their active/inactive state and description |
+| `status <unit>` | Print status for a single named unit |
+| `start <unit>` | Activate a unit; prints `ExecStart` value if set |
+| `stop <unit>` | Deactivate an active unit |
+| `help` | Print the command reference |
+
+<Note>
+  `bootctl start` does not actually execute the `ExecStart` command in the current implementation — it marks the unit active and prints the `ExecStart` value for informational purposes. Full process spawning is not yet implemented in CrisOS v2.
+</Note>
+
+---
+
+## asm — x86 assembly arithmetic
+
+The `asm` command exposes four integer arithmetic routines implemented in x86 AT&T assembly. `add_asm` lives in `src/math_asm.S`; `sub_asm`, `mul_asm`, and `div_asm` live in `src/asm_utils.S`. All four use the standard 32-bit cdecl calling convention.
+
+### Function signatures
+
+```c
+int add_asm(int a, int b);   // a + b  (ADD instruction)
+int sub_asm(int a, int b);   // a - b  (SUB instruction)
+int mul_asm(int a, int b);   // a * b  (IMUL instruction)
+int div_asm(int a, int b);   // a / b  (IDIV instruction; returns 0 if b == 0)
+```
+
+### Shell usage
+
+```text
+CrisOS> asm add 7 5
+= 12
+
+CrisOS> asm sub 20 8
+= 12
+
+CrisOS> asm mul 6 7
+= 42
+
+CrisOS> asm div 17 4
+= 4
+```
+
+Each command parses two integer arguments, calls the corresponding assembly function, and prints `= <result>`.
+
+<Tip>
+  The `asm` command is a quick way to verify that your cross-compiler toolchain generates correct 32-bit arithmetic. Run `asm add 7 5` immediately after boot — if the output is `= 12`, basic register passing and the cdecl ABI are working correctly.
+</Tip>

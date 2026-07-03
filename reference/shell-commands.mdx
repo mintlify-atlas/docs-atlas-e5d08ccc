@@ -1,0 +1,636 @@
+---
+title: "CrisOS v2 Shell Command Reference"
+sidebarTitle: "Shell Commands"
+description: "Complete reference for all CrisOS v2 built-in shell commands: file system operations, system info, control commands, and subsystem dispatchers."
+---
+
+The CrisOS v2 shell (`shell_run()`) provides approximately 25 built-in commands. All commands are typed at the `> ` prompt. Type `help` to see the full command list inline. This page documents every command with its syntax, arguments, and behavior, grouped by category.
+
+<Note>
+  Every character typed at the prompt is pre-processed before parsing: the `=`
+  character is globally replaced with `+`. This means `calc 2=3` is silently
+  treated as `calc 2+3`, and `echo foo=bar` becomes `echo foo+bar`. Design
+  arithmetic input accordingly.
+</Note>
+
+<Warning>
+  `panic` and `reboot` execute immediately — there is no confirmation prompt,
+  no undo, and no grace period. Running either command in a live session will
+  discard all unsaved state.
+</Warning>
+
+---
+
+## Quick Reference
+
+| Command | Description |
+|---------|-------------|
+| `help` | List all available commands |
+| `clear` | Clear the console screen |
+| `ls [path]` | List directory contents |
+| `pwd` | Print current working directory |
+| `cd <path>` | Change current directory |
+| `mkdir <path>` | Create a new directory |
+| `rmdir <path>` | Remove an empty directory |
+| `rm <path>` | Remove a file |
+| `touch <path>` | Create an empty file |
+| `cp <src> <dst>` | Copy a file |
+| `mv <src> <dst>` | Move or rename a file |
+| `cat <file>` | Print file contents |
+| `grep <pattern> <file>` | Search for a pattern in a file |
+| `echo <text> [> file]` | Print text or write to a file |
+| `stat <file>` | Show file path and size |
+| `df` | Show disk usage summary |
+| `uname` | Print OS identifier |
+| `whoami` | Print current user |
+| `mouse` | Show current mouse state |
+| `kblayout [us\|es\|de]` | Show or change keyboard layout |
+| `reboot` | Hardware reset the machine |
+| `panic [message]` | Trigger a kernel panic |
+| `lcp <args>` | Invoke the in-kernel package manager |
+| `systemctl <args>` | Invoke the service manager |
+| `bootctl <args>` | Invoke the boot manager |
+| `gui` | Launch the VGA text-mode GUI overlay |
+| `asm <op> <a> <b>` | Assembly arithmetic (add/sub/mul/div) |
+| `calc <expression>` | Evaluate an arithmetic expression |
+
+---
+
+## File System Commands
+
+### `ls`
+
+```
+ls [path]
+```
+
+Lists files and directories at `path`. If no path is given, lists the current working directory. Calls `vfs_list()` internally. Prints `Invalid path` if the path does not exist or is not accessible.
+
+<ParamField path="path" type="string">
+  Optional. The VFS path to list. Defaults to the current directory when
+  omitted.
+</ParamField>
+
+**Examples:**
+
+```
+> ls
+> ls /bin
+> ls ../docs
+```
+
+---
+
+### `pwd`
+
+```
+pwd
+```
+
+Prints the absolute path of the current working directory by calling `vfs_pwd()`. Takes no arguments.
+
+**Example:**
+
+```
+> pwd
+/home
+```
+
+---
+
+### `cd`
+
+```
+cd <path>
+```
+
+Changes the current working directory. Supports both absolute paths (starting with `/`) and relative paths. Prints `Directory not found` if the target does not exist or is not a directory.
+
+<ParamField path="path" type="string" required>
+  Destination directory path. Must resolve to an existing directory in the VFS.
+</ParamField>
+
+**Examples:**
+
+```
+> cd /
+> cd src
+> cd ../lib
+```
+
+---
+
+### `mkdir`
+
+```
+mkdir <path>
+```
+
+Creates a new directory at `path`. Prints `Cannot create directory` if the parent directory does not exist, the path already exists, or the VFS node table is full.
+
+<ParamField path="path" type="string" required>
+  Path of the directory to create. The parent directory must already exist.
+</ParamField>
+
+**Example:**
+
+```
+> mkdir /home/projects
+```
+
+---
+
+### `rmdir`
+
+```
+rmdir <path>
+```
+
+Removes the directory at `path`. The directory must be empty. Prints `Cannot remove directory` if the path is not found, is not a directory, or the directory still contains entries.
+
+<ParamField path="path" type="string" required>
+  Path of the directory to remove. Must be empty.
+</ParamField>
+
+**Example:**
+
+```
+> rmdir /home/old
+```
+
+---
+
+### `rm`
+
+```
+rm <path>
+```
+
+Removes a file from the VFS. Prints `Cannot remove file` if the path does not exist, the path points to a directory (use `rmdir` for that), or the VFS rejects the operation.
+
+<ParamField path="path" type="string" required>
+  Path of the file to delete. Must be a regular file, not a directory.
+</ParamField>
+
+**Example:**
+
+```
+> rm /tmp/scratch.txt
+```
+
+---
+
+### `touch`
+
+```
+touch <path>
+```
+
+Creates a new empty file at `path`. Prints `Cannot touch file` if the parent directory does not exist or the VFS is full. Does not update timestamps on existing files — it is a creation-only primitive.
+
+<ParamField path="path" type="string" required>
+  Path where the new empty file will be created.
+</ParamField>
+
+**Example:**
+
+```
+> touch /tmp/notes.txt
+```
+
+---
+
+### `cp`
+
+```
+cp <src> <dst>
+```
+
+Copies the file at `src` to `dst`. Both arguments are required. Prints `Copy failed` if `src` does not exist, `dst`'s parent does not exist, or the VFS cannot accommodate the copy.
+
+<ParamField path="src" type="string" required>
+  Path of the source file.
+</ParamField>
+
+<ParamField path="dst" type="string" required>
+  Destination path for the copy.
+</ParamField>
+
+**Example:**
+
+```
+> cp /etc/config.txt /tmp/config.bak
+```
+
+---
+
+### `mv`
+
+```
+mv <src> <dst>
+```
+
+Moves or renames the file at `src` to `dst`. Both arguments are required. Prints `Move failed` if the operation cannot be completed.
+
+<ParamField path="src" type="string" required>
+  Current path of the file.
+</ParamField>
+
+<ParamField path="dst" type="string" required>
+  New path for the file.
+</ParamField>
+
+**Example:**
+
+```
+> mv /tmp/draft.txt /home/final.txt
+```
+
+---
+
+### `cat`
+
+```
+cat <file>
+```
+
+Reads `file` from the VFS and prints its raw content to the console. Prints `File not found or is a directory` if the path does not resolve to a readable regular file.
+
+<ParamField path="file" type="string" required>
+  Path of the file to print. Must be a regular file.
+</ParamField>
+
+**Example:**
+
+```
+> cat /etc/motd
+```
+
+---
+
+### `grep`
+
+```
+grep <pattern> <file>
+```
+
+Searches for `pattern` in the lines of `file`. Prints each matching line prefixed with its 1-based line number. The match is case-sensitive and substring-based. Prints `Pattern search failed` if the file cannot be read or is empty.
+
+<ParamField path="pattern" type="string" required>
+  The literal substring to search for. Case-sensitive.
+</ParamField>
+
+<ParamField path="file" type="string" required>
+  Path of the file to search.
+</ParamField>
+
+**Example:**
+
+```
+> grep error /var/log/boot.log
+3: kernel error: no device
+```
+
+---
+
+### `echo`
+
+```
+echo <text>
+echo <text> > <file>
+```
+
+In the first form, prints `text` to the console followed by a newline.
+
+In the second form, writes `text` to `file` in the VFS using `vfs_write()`. The file is created if it does not exist, or overwritten if it does. This uses a single `>` — append (`>>`) is not supported.
+
+<ParamField path="text" type="string" required>
+  The text to output or write. Everything before the `>` separator is taken as
+  content.
+</ParamField>
+
+<ParamField path="file" type="string">
+  Optional VFS destination path. When present, output is written to the file
+  instead of the console.
+</ParamField>
+
+<Note>
+  Because the shell replaces `=` with `+` before parsing, writing something
+  like `echo x=1 > file.txt` will store `x+1` in the file.
+</Note>
+
+**Examples:**
+
+```
+> echo Hello, CrisOS!
+Hello, CrisOS!
+
+> echo kernel booted > /var/log/boot.log
+```
+
+---
+
+### `stat`
+
+```
+stat <file>
+```
+
+Prints the path and size in bytes of the specified file. Reports `No such file or directory` if the path cannot be found in the VFS.
+
+<ParamField path="file" type="string" required>
+  Path of the file to inspect.
+</ParamField>
+
+**Example output:**
+
+```
+> stat /etc/motd
+/etc/motd - size: 42 bytes
+```
+
+---
+
+### `df`
+
+```
+df
+```
+
+Prints a hardcoded disk usage summary for the `rootfs` filesystem. Takes no arguments. The values shown are fixed at compile time and reflect the design capacity of the in-memory VFS.
+
+**Example output:**
+
+```
+Filesystem  1K-blocks  Used  Avail  Mounted on
+rootfs      64        8     56     /
+```
+
+---
+
+## System Information Commands
+
+### `uname`
+
+```
+uname
+```
+
+Prints the OS identifier string `CrisOS i386`. Takes no arguments.
+
+**Example:**
+
+```
+> uname
+CrisOS i386
+```
+
+---
+
+### `whoami`
+
+```
+whoami
+```
+
+Prints the current user name, which is always `cris` in CrisOS v2. Takes no arguments.
+
+**Example:**
+
+```
+> whoami
+cris
+```
+
+---
+
+### `mouse`
+
+```
+mouse
+```
+
+Reads the current PS/2 mouse state via `mouse_get_state()` and prints the x position, y position, and button bitmask. Takes no arguments.
+
+**Example output:**
+
+```
+> mouse
+Mouse: x=320 y=240 buttons=0
+```
+
+---
+
+### `kblayout`
+
+```
+kblayout
+kblayout us|es|de
+```
+
+Without an argument, prints the currently active keyboard layout identifier and a usage reminder. With an argument, switches the kernel keyboard driver to the specified layout.
+
+<ParamField path="layout" type="string">
+  One of `us` (English), `es` (Spanish), or `de` (German). Required when
+  switching layouts.
+</ParamField>
+
+**Examples:**
+
+```
+> kblayout
+Current layout: us (English)
+Usage: kblayout us|es|de
+
+> kblayout de
+Layout set to de (German)
+```
+
+---
+
+## System Control Commands
+
+### `help`
+
+```
+help
+```
+
+Prints four lines listing all available shell commands. Takes no arguments. This is a quick reference — consult this page for full documentation.
+
+**Example output:**
+
+```
+Commands: help clear ls pwd cd mkdir rmdir rm touch
+ cp mv cat grep echo uname whoami df stat panic
+ reboot lcp systemctl bootctl gui asm calc
+ kblayout mouse
+```
+
+---
+
+### `clear`
+
+```
+clear
+```
+
+Clears the console screen by calling `console_clear()`. Takes no arguments. The prompt is re-drawn on the next iteration.
+
+---
+
+### `reboot`
+
+```
+reboot
+```
+
+Prints `Rebooting...` and immediately triggers a hardware CPU reset via I/O port `0x64`. The machine restarts without saving any state.
+
+<Warning>
+  This command is instant and unrecoverable. All unsaved data in the VFS and
+  any running subsystem state will be lost.
+</Warning>
+
+---
+
+### `panic`
+
+```
+panic [message]
+```
+
+Triggers a kernel panic by calling `kernel_panic()`. The screen turns red, the `message` is displayed, and the CPU is halted. If no message is given, the default string `Kernel panic triggered from shell.` is used.
+
+<ParamField path="message" type="string">
+  Optional human-readable panic description. The entire remainder of the
+  command line is passed as the message.
+</ParamField>
+
+<Warning>
+  This command halts the CPU immediately. There is no recovery path other than
+  a physical reboot.
+</Warning>
+
+**Examples:**
+
+```
+> panic
+> panic out of memory in userspace
+```
+
+---
+
+## Subsystem Commands
+
+### `lcp`
+
+```
+lcp <subcommand> [args]
+```
+
+Dispatches to the in-kernel LCP (Lightweight CrisOS Packager) package manager. See the [LCP Commands Reference](/reference/lcp-commands) for the full list of subcommands. Common subcommands include `list`, `info`, `install`, `remove`, `search`, `files`, `depends`, `verify`, `update`, and `upgrade`.
+
+**Examples:**
+
+```
+> lcp list
+> lcp info nano-cris
+> lcp install editor-lite
+```
+
+---
+
+### `systemctl`
+
+```
+systemctl <args>
+```
+
+Dispatches to the CrisOS service manager via `systemd_handle_command()`. Manages kernel services and daemons.
+
+---
+
+### `bootctl`
+
+```
+bootctl <args>
+```
+
+Dispatches to the CrisOS boot manager via `boot_handle_command()`. Manages boot configuration and entries.
+
+---
+
+### `gui`
+
+```
+gui
+```
+
+Launches the VGA text-mode graphical interface overlay by calling `gui_show()`. Takes no arguments. The GUI runs over the existing text-mode console.
+
+---
+
+### `asm`
+
+```
+asm <op> <a> <b>
+```
+
+Invokes one of four Assembly-backed integer arithmetic routines and prints the result. All operands are signed integers. Division by zero behavior is not defined.
+
+<ParamField path="op" type="string" required>
+  Arithmetic operation. One of `add`, `sub`, `mul`, or `div`.
+</ParamField>
+
+<ParamField path="a" type="integer" required>
+  First operand. Supports an optional leading `-` sign.
+</ParamField>
+
+<ParamField path="b" type="integer" required>
+  Second operand. Supports an optional leading `-` sign.
+</ParamField>
+
+**Examples:**
+
+```
+> asm add 10 32
+= 42
+
+> asm div 100 4
+= 25
+
+> asm sub -5 3
+= -8
+```
+
+---
+
+### `calc`
+
+```
+calc <expression>
+```
+
+Passes `expression` to `calc_app()`, which evaluates an arithmetic expression supporting integers, `+`, `-`, `*`, `/`, and parentheses, then prints `= <result>`.
+
+<ParamField path="expression" type="string" required>
+  Arithmetic expression string. Supports `+`, `-`, `*`, `/`, and
+  parentheses. Spaces are allowed.
+</ParamField>
+
+<Note>
+  Because the shell replaces `=` with `+` globally before parsing, the
+  expression `2=3` arrives at `calc_app` as `2+3`. Use `+` directly in all
+  expressions to avoid ambiguity.
+</Note>
+
+**Examples:**
+
+```
+> calc 2+3
+= 5
+
+> calc (10+5)*2
+= 30
+```

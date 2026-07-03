@@ -1,0 +1,365 @@
+---
+title: "LCP Package Manager: Host CLI and In-Kernel Package System"
+sidebarTitle: "LCP Package Manager"
+description: "LCP is CrisOS v2's dual-mode package manager. Use the Python host CLI to manage packages on your development machine or the in-kernel lcp command inside the OS."
+---
+
+LCP (Lightweight CrisOS Packager) ships in two forms: a Python 3 CLI (`tools/lcp.py`) for host-side package management during development, and an in-kernel C implementation (`src/lcp.c`) accessible via the `lcp` shell command at runtime. Both modes share the same package metadata format and the same five packages in the default `main` repository, so workflows familiar from one mode translate directly to the other.
+
+## Architecture
+
+<CardGroup cols={2}>
+  <Card title="Host CLI (tools/lcp.py)" icon="terminal">
+    Full-featured Python 3 tool. Manages a persistent state directory at `~/.lcp/`, supports remote and local repositories, version comparison, dependency resolution, and a package cache. Runs entirely on your development machine — no OS boot required.
+  </Card>
+  <Card title="In-Kernel (src/lcp.c)" icon="microchip">
+    Lightweight C implementation compiled directly into the CrisOS kernel. Reads `lcp_repo.txt` from the CRFS rootfs at boot, parses packages into an in-memory table, and exposes the `lcp` shell command. State is volatile — it resets on every reboot.
+  </Card>
+</CardGroup>
+
+### Host CLI storage
+
+The host CLI keeps all persistent data under `~/.lcp/`:
+
+| Path | Purpose |
+|---|---|
+| `~/.lcp/repos.json` | List of configured repositories (name, URL, enabled flag) |
+| `~/.lcp/installed.json` | Installed package records and held packages |
+| `~/.lcp/cache/` | Per-repo cached index files downloaded by `lcp update` |
+
+### In-kernel repo loading
+
+At boot, `lcp_init()` attempts to open `lcp_repo.txt` from the VFS. If the file is found and parses correctly, it becomes the live package database. If the file is missing or malformed, the kernel falls back to a hardcoded copy of the same five packages compiled into `src/lcp.c`. The in-kernel implementation supports up to **16 packages**, **8 dependencies per package**, and **8 files per package**.
+
+---
+
+## Package format
+
+### JSON (host CLI)
+
+The host CLI reads and caches repository indexes as JSON. Each package entry in `lcp_main_repo.json` contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Unique package identifier |
+| `version` | string | Semantic version string (e.g. `1.0.0`) |
+| `description` | string | Short human-readable description |
+| `arch` | string | Target architecture (always `i386` for CrisOS v2) |
+| `maintainer` | string | Package author or team |
+| `license` | string | SPDX license identifier |
+| `dependencies` | array | Names of required packages |
+| `files` | array | Relative paths installed by the package |
+| `size` | integer | Package size in bytes |
+
+Example entry from `tools/lcp_main_repo.json`:
+
+```json
+{
+  "name": "nano-cris",
+  "version": "1.0.0",
+  "description": "Editor de texto simple para CrisOS.",
+  "arch": "i386",
+  "maintainer": "Cristopher",
+  "license": "MIT",
+  "dependencies": ["libc", "termcap"],
+  "files": ["bin/nano-cris", "share/nano-cris/help.txt"],
+  "size": 32000
+}
+```
+
+### Text format (in-kernel `lcp_repo.txt`)
+
+The in-kernel parser reads a plain-text format where each package is a block of `key:value` lines separated by `---`:
+
+```text
+name:nano-cris
+version:1.0.0
+description:Editor de texto simple para CrisOS
+arch:i386
+maintainer:Cristopher
+license:MIT
+dependencies:libc,termcap
+files:bin/nano-cris,share/nano-cris/help.txt
+size:32000
+repo:main
+---
+name:editor-lite
+version:0.5.0
+...
+```
+
+---
+
+## Available packages
+
+| Package | Version | Description | License | Dependencies |
+|---|---|---|---|---|
+| `editor-lite` | 0.5.0 | Lightweight text editor for CrisOS | MIT | — |
+| `nano-cris` | 1.0.0 | Simple text editor for CrisOS | MIT | `libc`, `termcap` |
+| `textpad` | 0.9.1 | Terminal-based text editor for CrisOS | Apache-2.0 | `libc` |
+| `libc` | 1.0.0 | Minimal standard library for CrisOS | MIT | — |
+| `termcap` | 1.2.3 | Terminal compatibility library for CrisOS | BSD-2-Clause | — |
+
+---
+
+## Host CLI usage
+
+Run `python tools/lcp.py <command> [args]` from the repository root. All commands require `tools/lcp_main_repo.json` to be present alongside `lcp.py` (the default `main` repo uses a `file:` URL that resolves relative to the script directory).
+
+<Accordion title="help — print command reference">
+
+```bash
+python tools/lcp.py help
+python tools/lcp.py help install
+```
+
+Prints the general command reference, or detailed help for a specific command.
+
+</Accordion>
+
+<Accordion title="search — find packages by keyword">
+
+```bash
+python tools/lcp.py search editor
+python tools/lcp.py search libc
+```
+
+Searches package names and descriptions across all enabled repositories. Results are printed one per line.
+
+</Accordion>
+
+<Accordion title="info — show package metadata">
+
+```bash
+python tools/lcp.py info nano-cris
+```
+
+Prints `name`, `version`, `description`, `size`, `dependencies`, `repository`, `author`, and `license` for the named package.
+
+</Accordion>
+
+<Accordion title="install — install a package">
+
+<CodeGroup>
+
+```bash Basic install
+python tools/lcp.py install nano-cris
+```
+
+```bash Force reinstall
+python tools/lcp.py install nano-cris --force
+```
+
+```bash Skip dependency resolution
+python tools/lcp.py install nano-cris --no-deps
+```
+
+```bash Install into an alternative root
+python tools/lcp.py install nano-cris --root /tmp/my-rootfs
+```
+
+</CodeGroup>
+
+Resolves the full dependency graph and installs each package in topological order. Use `--force` to reinstall an already-installed package. Use `--no-deps` to install only the named package without pulling in dependencies. Use `--root <path>` to install into a directory other than the current working directory.
+
+</Accordion>
+
+<Accordion title="remove — uninstall a package">
+
+<CodeGroup>
+
+```bash Remove package
+python tools/lcp.py remove nano-cris
+```
+
+```bash Remove and delete configuration files
+python tools/lcp.py remove nano-cris --purge
+```
+
+</CodeGroup>
+
+Removes a package and deletes its tracked files. Refuses to remove a package that other installed packages depend on. With `--purge`, also deletes `etc/<package>.conf` if present.
+
+</Accordion>
+
+<Accordion title="update — refresh repository metadata">
+
+```bash
+python tools/lcp.py update
+```
+
+Downloads (or re-reads) the index for every enabled repository and writes the result to `~/.lcp/cache/<name>.json`. Run this before `install` or `upgrade` to pick up new package versions.
+
+</Accordion>
+
+<Accordion title="upgrade — upgrade installed packages">
+
+<CodeGroup>
+
+```bash Upgrade all installed packages
+python tools/lcp.py upgrade
+```
+
+```bash Upgrade a single package
+python tools/lcp.py upgrade nano-cris
+```
+
+</CodeGroup>
+
+Compares installed versions against the cached repository index and reinstalls any package where a newer version is available.
+
+</Accordion>
+
+<Accordion title="list — list packages by state">
+
+<CodeGroup>
+
+```bash List installed packages (default)
+python tools/lcp.py list
+python tools/lcp.py list --installed
+```
+
+```bash List all available packages
+python tools/lcp.py list --available
+```
+
+```bash List packages with pending upgrades
+python tools/lcp.py list --upgradable
+```
+
+</CodeGroup>
+
+</Accordion>
+
+<Accordion title="files — show files owned by a package">
+
+```bash
+python tools/lcp.py files nano-cris
+```
+
+Prints each file path that was written when the package was installed, one per line.
+
+</Accordion>
+
+<Accordion title="depends — show package dependencies">
+
+```bash
+python tools/lcp.py depends nano-cris
+```
+
+Prints the direct dependency list for a package, whether or not it is currently installed. Reads from the cached repository index if the package is not installed.
+
+</Accordion>
+
+<Accordion title="verify — check installed package integrity">
+
+```bash
+python tools/lcp.py verify nano-cris
+```
+
+Walks the file list recorded at install time and reports any files that are missing from disk. Exits with code `5` if any files are missing.
+
+</Accordion>
+
+<Accordion title="clean — clear cached repository data">
+
+```bash
+python tools/lcp.py clean
+```
+
+Deletes all files under `~/.lcp/cache/`. Run `lcp update` afterwards to rebuild the cache from scratch.
+
+</Accordion>
+
+---
+
+## Repository management
+
+<Steps>
+  <Step title="List configured repositories">
+    ```bash
+    python tools/lcp.py repo list
+    ```
+    Prints each repository's name, URL, and enabled/disabled status.
+  </Step>
+  <Step title="Add a repository">
+    ```bash
+    python tools/lcp.py repo add myrepo https://example.com/packages/index.json
+    ```
+    Appends a new entry to `~/.lcp/repos.json`. Run `lcp update` to populate the cache.
+  </Step>
+  <Step title="Enable or disable a repository">
+    ```bash
+    python tools/lcp.py repo enable myrepo
+    python tools/lcp.py repo disable myrepo
+    ```
+    Disabled repositories are skipped during `update`, `search`, and `install`.
+  </Step>
+  <Step title="Remove a repository">
+    ```bash
+    python tools/lcp.py repo remove myrepo
+    ```
+    Removes the entry from `~/.lcp/repos.json`. Does not uninstall packages that came from it.
+  </Step>
+</Steps>
+
+The default repository is named `main` and points to the local JSON file:
+
+```python
+DEFAULT_REPOS = [
+    {
+        'name': 'main',
+        'url': f'file:{SCRIPT_DIR / "lcp_main_repo.json"}',
+        'enabled': True,
+    }
+]
+```
+
+<Note>
+  The default repo URL uses a `file:` scheme pointing to `tools/lcp_main_repo.json` relative to the script directory. To use a remote repository, add it with `python tools/lcp.py repo add <name> https://...` and run `python tools/lcp.py update` to cache its index.
+</Note>
+
+---
+
+## Exit codes
+
+| Code | Constant | Meaning |
+|---|---|---|
+| `0` | `EXIT_SUCCESS` | Operation completed successfully |
+| `1` | `EXIT_ERROR` | Generic error |
+| `2` | `EXIT_INVALID_COMMAND` | Unknown or malformed command |
+| `3` | `EXIT_NOT_FOUND` | Package not found in any repository or installed database |
+| `4` | `EXIT_DEP_MISSING` | One or more dependencies could not be resolved |
+| `5` | `EXIT_INSTALL_FAIL` | File creation or write failed during install |
+| `6` | `EXIT_PERMISSIONS` | Insufficient filesystem permissions |
+| `7` | `EXIT_REPO_DOWN` | Repository fetch failed (network or file not found) |
+| `8` | `EXIT_ALREADY_INSTALLED` | Package is already installed (use `--force` to override) |
+| `9` | `EXIT_CORRUPT` | Repository index or installed database is malformed |
+
+---
+
+## In-kernel `lcp` command
+
+Inside a running CrisOS v2 shell, the `lcp` command is dispatched to `lcp_handle_command()` in `src/lcp.c`. The in-kernel implementation supports a subset of the host CLI's commands:
+
+| Command | Description |
+|---|---|
+| `lcp help` | Print available commands |
+| `lcp list` | List installed packages (default) |
+| `lcp list --available` | List all packages from the repo |
+| `lcp list --installed` | List only installed packages |
+| `lcp search <term>` | Case-insensitive search across names and descriptions |
+| `lcp info <pkg>` | Show metadata for a package |
+| `lcp install <pkg>` | Mark a package as installed; auto-installs dependencies |
+| `lcp install --no-deps <pkg>` | Install without resolving dependencies |
+| `lcp remove <pkg>` | Mark a package as uninstalled |
+| `lcp remove --purge <pkg>` | Remove and note purge of configuration |
+| `lcp update` | Re-parse `lcp_repo.txt` from the VFS |
+| `lcp upgrade [pkg]` | Mark installed packages as upgraded |
+| `lcp files <pkg>` | List files associated with a package |
+| `lcp depends <pkg>` | Print dependencies for a package |
+| `lcp verify <pkg>` | Confirm package is installed and healthy |
+
+<Warning>
+  The in-kernel `lcp install` command marks packages as installed in the kernel's in-memory table only. It does **not** write files to disk or persist state across reboots. To permanently add packages to the rootfs, use the host CLI and rebuild the image with `make iso`.
+</Warning>

@@ -1,0 +1,204 @@
+---
+title: "Contributing to CrisOS v2"
+sidebarTitle: "Contributing"
+description: "Guidelines for adding features, fixing bugs, writing new drivers, or extending the kernel in CrisOS v2."
+---
+
+CrisOS v2 is an open educational project. Contributions — whether new drivers, shell commands, subsystem improvements, or documentation — are welcome. Because the kernel runs in a freestanding environment with no standard library, there are a small number of conventions you must follow to keep the build clean and consistent. This page explains those conventions and walks through the most common contribution patterns.
+
+## Code Conventions
+
+<CardGroup cols={2}>
+  <Card title="Language standard" icon="code">
+    **C99 only** (`-std=c99`). No C++, no compiler extensions. The `-Wall -Wextra` flags are always active; new code must compile cleanly with zero warnings.
+  </Card>
+  <Card title="No standard library" icon="ban">
+    Never `#include <stdio.h>`, `<stdlib.h>`, `<string.h>`, or any other hosted-environment header. The freestanding build will reject them at link time.
+  </Card>
+  <Card title="String operations" icon="font">
+    Use the equivalents from `kstring.h`: `kstrlen`, `kstrcmp`, `kstrcpy`, `kstrcat`, `kstrstr`, `kitoa`, and `kstreq`.
+  </Card>
+  <Card title="Memory allocation" icon="memory">
+    Use `kmalloc` / `kfree` from `memory.h`. The current allocator is a bump allocator — `kfree` is intentionally a no-op. Do not write code that depends on memory being freed during a single session.
+  </Card>
+  <Card title="Console output" icon="terminal">
+    Use `console_print(const char *)` for strings and `console_putchar(char)` for individual characters. There is no `printf`; use `kitoa` to convert integers before printing.
+  </Card>
+  <Card title="Assembly" icon="microchip">
+    Assembly files use **AT&T syntax** and carry the `.S` extension so they are preprocessed by GCC before assembly. Inline assembly in C files uses `asm volatile(...)`.
+  </Card>
+</CardGroup>
+
+## Directory Layout
+
+Keep new files in the correct directory — the Makefile pattern rules depend on it:
+
+| Directory | Contents |
+|---|---|
+| `src/` | Kernel subsystems: scheduling, VFS, shell, memory, string utilities, etc. |
+| `drivers/` | Hardware drivers: console (VGA), keyboard, mouse, PIC, PIT timer. |
+| `boot/` | Multiboot entry point (`boot.S`). Do not add unrelated files here. |
+| `tools/` | Host-side Python scripts (e.g. `build_rootfs.py`). Not compiled into the kernel. |
+| `rootfs/` | Files that will be packed into the CRFS image and mounted at boot. |
+
+## Adding a New Shell Command
+
+<Steps>
+  <Step title="Implement the handler function">
+    Write your command logic in a suitable `.c` file. If the command is self-contained, add it to an existing file (e.g. `src/shell.c`) or create a new one such as `src/mycommand.c`. The handler signature should accept a `const char *` for the remainder of the command line:
+
+    ```c
+    // src/mycommand.c
+    #include "console.h"
+    #include "kstring.h"
+
+    void mycommand_run(const char *args)
+    {
+        if (!args || kstrlen(args) == 0) {
+            console_print("mycommand: no arguments given\n");
+            return;
+        }
+        console_print("mycommand: ");
+        console_print(args);
+        console_putchar('\n');
+    }
+    ```
+  </Step>
+
+  <Step title="Declare the function in a header">
+    Add the prototype to the corresponding `.h` file (create one if needed):
+
+    ```c
+    // src/mycommand.h
+    #ifndef MYCOMMAND_H
+    #define MYCOMMAND_H
+
+    void mycommand_run(const char *args);
+
+    #endif
+    ```
+  </Step>
+
+  <Step title="Add the source file to the Makefile">
+    Append the new `.c` file to the `SRCS` variable in the Makefile:
+
+    ```makefile
+    SRCS  = src/kernel.c    \
+            ...
+            src/mycommand.c
+    ```
+  </Step>
+
+  <Step title="Dispatch the command in shell_run()">
+    Open `src/shell.c` and add a dispatch block inside `shell_run()`. Use `kstreq` to match the command name and pass the remainder of the input line as `rest`:
+
+    ```c
+    #include "mycommand.h"
+
+    // inside shell_run(), alongside the other command blocks:
+    if (kstreq(cmd, "mycommand")) {
+        mycommand_run(rest);
+        continue;
+    }
+    ```
+  </Step>
+
+  <Step title="Register the command in the help text">
+    Locate the `help` command block in `shell_run()` and add `mycommand` to the printed list so users can discover it via `> help`.
+  </Step>
+</Steps>
+
+## Adding a New Driver
+
+<Steps>
+  <Step title="Create the driver source and header">
+    Create `drivers/mydriver.c` and `src/mydriver.h`. Driver sources live in `drivers/`; their headers live in `src/` alongside the rest of the kernel headers so they can be included with a plain `#include "mydriver.h"`.
+  </Step>
+
+  <Step title="Implement the init and I/O functions">
+    At minimum, provide an initialisation function and whatever read/write routines your hardware needs:
+
+    ```c
+    // drivers/mydriver.c
+    #include "console.h"
+    #include "mydriver.h"
+
+    void mydriver_init(void)
+    {
+        /* configure hardware registers */
+        console_print("[ OK ] My driver initialized\n");
+    }
+
+    void mydriver_write(unsigned char data)
+    {
+        /* write data to device */
+        (void)data;
+    }
+    ```
+  </Step>
+
+  <Step title="Add to DRV_SRCS in the Makefile">
+    Append the new file to the `DRV_SRCS` variable. The `drv_` prefix rule will compile it to `build/drv_mydriver.o` automatically:
+
+    ```makefile
+    DRV_SRCS = drivers/console.c  \
+               ...
+               drivers/mydriver.c
+    ```
+  </Step>
+
+  <Step title="Call the init function from kmain()">
+    Open `src/kernel.c` and call `mydriver_init()` inside `kmain()`, before the call to `shell_run()`. Add a `console_print` status line to match the existing pattern:
+
+    ```c
+    #include "mydriver.h"
+
+    // inside kmain(), after the existing driver inits:
+    mydriver_init();
+    console_print("[ OK ] My driver initialized\n");
+    ```
+  </Step>
+
+  <Step title="Configure PIC mask if IRQ-driven">
+    If your driver relies on a hardware interrupt, unmask the appropriate IRQ line with `pic_mask()`. The first byte controls IRQs 0–7 (master PIC) and the second controls IRQs 8–15 (slave PIC). A `0` bit enables the IRQ, a `1` bit masks it:
+
+    ```c
+    // Example: enable IRQ4 (COM1 serial) on the master PIC
+    // Current mask is 0xFC (IRQ0 and IRQ1 enabled).
+    // To also enable IRQ4: clear bit 4 → 0xEC
+    pic_mask(0xEC, 0xFF);
+    ```
+  </Step>
+</Steps>
+
+## Adding Files to the Rootfs
+
+The rootfs is a read-only CRFS image that the bootloader passes to the kernel as a Multiboot module. To add new files:
+
+1. Place the files anywhere under `rootfs/` — subdirectories are supported.
+2. Run `make iso` or `make echo-iso` to rebuild the image. The `build_rootfs.py` tool re-packs everything in `rootfs/` into `iso/boot/rootfs.bin`.
+3. At boot, the VFS auto-discovers every file in the image and makes it available under the root directory. No kernel changes are required.
+
+## Build System Patterns
+
+The Makefile uses two generic pattern rules that mean **you rarely need to touch it** for new source files:
+
+```makefile
+# Kernel sources: src/foo.c → build/foo.o
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Driver sources: drivers/foo.c → build/drv_foo.o
+$(BUILD_DIR)/drv_%.o: $(DRV_DIR)/%.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+```
+
+The only manual step is adding new `.c` files to `SRCS` (for `src/`) or `DRV_SRCS` (for `drivers/`). Assembly files must be listed explicitly in `ASMS` and have their own build rules.
+
+<Note>
+CrisOS v2 has no automated test framework. The standard way to verify a change is to run `make run`, boot into QEMU, and exercise the affected shell commands interactively. Keep your changes small and test each one in isolation before combining them.
+</Note>
+
+<Tip>
+Read `src/kernel.c` first — it is short and contains the exact initialisation sequence in order: GDT → IDT → PIC → PIT → keyboard → mouse → rootfs → VFS → boot manager → service manager → LCP → shell. Knowing this order makes it immediately clear where to insert a new subsystem call.
+</Tip>

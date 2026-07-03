@@ -1,0 +1,171 @@
+---
+title: "CrisOS v2 Kernel: Initialization Sequence and Module Startup"
+sidebarTitle: "Kernel"
+description: "How kmain initializes CrisOS v2: console, GDT, IDT, PIC, timer, keyboard, mouse, VFS, service manager, LCP, and the shell."
+---
+
+`kmain` is the C entry point of CrisOS v2. It is called by the boot assembly stub in `boot/boot.S` with a single argument — the physical address of the Multiboot information structure populated by GRUB — and orchestrates the initialization of every kernel subsystem in a deterministic, sequential order. Control never returns from `kmain`; it ends with an infinite call to `shell_run()`, and the fallback `hlt` loop below it is never reached under normal operation.
+
+## Full `kmain` Source
+
+```c
+void kmain(unsigned long mbi_addr)
+{
+    console_clear();
+
+    console_print("================================\n");
+    console_print("        CrisOS Kernel\n");
+    console_print("================================\n\n");
+
+    console_print("[ OK ] Console initialized\n");
+
+    gdt_init();
+
+    idt_init();
+
+    pic_init();
+    console_print("[ OK ] PIC initialized (IRQs 0-15 remapped)\n");
+
+    pic_mask(0xFD, 0xFF); /* enable only IRQ1 (keyboard) -- polling mode */
+
+    timer_init(100);
+    console_print("[ OK ] PIT timer initialized (100 Hz)\n");
+
+    keyboard_init();
+    console_print("[ OK ] Keyboard initialized\n");
+
+    mouse_init();
+    pic_mask(0xFC, 0xEF); /* enable IRQ1 + IRQ12 */
+
+    bool rootfs_loaded = false;
+
+    if (mbi_addr) {
+        struct multiboot_info *mbi = (struct multiboot_info *)mbi_addr;
+
+        if (mbi->flags & 0x8) {
+            console_print("[ OK ] Multiboot modules detected\n");
+
+            struct multiboot_module *mods =
+                (struct multiboot_module *)mbi->mods_addr;
+
+            for (unsigned long i = 0; i < mbi->mods_count; ++i) {
+                const char *name = (const char *)mods[i].cmdline;
+                if (name && kstrstr(name, "rootfs")) {
+                    console_print("[ INFO ] Mounting rootfs...\n");
+                    if (fs_init((const void *)mods[i].mod_start,
+                                mods[i].mod_end - mods[i].mod_start)) {
+                        console_print("[ OK ] Rootfs mounted\n");
+                        if (vfs_init()) {
+                            console_print("[ OK ] VFS initialized\n");
+                            rootfs_loaded = true;
+                        } else {
+                            console_print("[FAIL] VFS initialization failed\n");
+                        }
+                    } else {
+                        console_print("[FAIL] Rootfs mount failed\n");
+                    }
+                    break;
+                }
+            }
+
+            if (!rootfs_loaded)
+                console_print("[WARN] No rootfs module found or failed to mount\n");
+        } else {
+            console_print("[FAIL] No multiboot modules found\n");
+        }
+    } else {
+        console_print("[FAIL] Invalid multiboot info\n");
+    }
+
+    boot_init();
+    console_print("[ OK ] Boot manager initialized\n");
+
+    systemd_init();
+    console_print("[ OK ] Service manager initialized\n");
+
+    lcp_init();
+    console_print("[ OK ] LCP package manager initialized\n\n");
+
+    int sum = add_asm(7, 5);
+    char buf[32];
+    kitoa(sum, buf, sizeof(buf));
+    console_print("[ASM] 7 + 5 = ");
+    console_print(buf);
+    console_print("\n\n");
+
+    console_print("Launching shell...\n\n");
+
+    shell_run();
+
+    while (1)
+        asm volatile("hlt");
+}
+```
+
+## Initialization Order
+
+The table below maps each subsystem to the exact function called during startup. Order matters — for example, the IDT must be installed before the PIC is unmasked, and the PIC must be initialized before any IRQ can fire.
+
+| Subsystem | Function(s) Called | Notes |
+|---|---|---|
+| Console | `console_clear()` | Clears the VGA buffer; all subsequent `[ OK ]` messages are visible from this point |
+| GDT | `gdt_init()` | Installs a 5-entry flat GDT (null, ring-0 code/data, ring-3 code/data) via `lgdt` |
+| IDT | `idt_init()` | Registers 32 CPU exception handlers and 16 IRQ handlers via `lidt` |
+| PIC | `pic_init()` then `pic_mask(0xFD, 0xFF)` | Remaps IRQs 0–15 to INT 0x20–0x2F; initially enables IRQ1 (keyboard) only |
+| Timer | `timer_init(100)` | Programs the 8253 PIT to fire at 100 Hz (10 ms per tick) |
+| Keyboard | `keyboard_init()` | Initializes the PS/2 keyboard driver |
+| Mouse | `mouse_init()` then `pic_mask(0xFC, 0xEF)` | Initializes the PS/2 mouse driver; unmasks IRQ12 alongside IRQ1 |
+| Rootfs | `fs_init()` from Multiboot module, then `vfs_init()` | Mounts the flat-file rootfs image loaded by GRUB as a Multiboot module |
+| Boot manager | `boot_init()` | Parses `.boot` unit files from the rootfs and runs `boot.target` |
+| Service manager | `systemd_init()` | Registers system services |
+| LCP | `lcp_init()` | Initializes the LCP package manager |
+| Shell | `shell_run()` | Enters the interactive command loop — does not return |
+
+## Multiboot Module Loading
+
+`kmain` uses two structs to parse the Multiboot information block passed by GRUB:
+
+```c
+struct multiboot_info {
+    unsigned long flags;       /* bitmask of valid fields        */
+    unsigned long mem_lower;   /* lower memory in KB             */
+    unsigned long mem_upper;   /* upper memory in KB             */
+    unsigned long boot_device;
+    unsigned long cmdline;
+    unsigned long mods_count;  /* number of loaded modules       */
+    unsigned long mods_addr;   /* physical address of module list */
+};
+
+struct multiboot_module {
+    unsigned long mod_start;  /* physical start address of module data */
+    unsigned long mod_end;    /* physical end address (exclusive)      */
+    unsigned long cmdline;    /* pointer to module command-line string */
+    unsigned long reserved;
+};
+```
+
+The kernel checks `mbi->flags & 0x8` to confirm that the module list fields are valid. It then iterates over the `mods_count` entries at `mods_addr` and calls `kstrstr(name, "rootfs")` on each module's command-line string. The first match is passed to `fs_init()` as a raw byte pointer plus length (`mod_end - mod_start`).
+
+## Kernel Panic
+
+When an unrecoverable error occurs — including any CPU exception caught by the IDT — the kernel calls `kernel_panic()`:
+
+```c
+void kernel_panic(const char *message) {
+    console_clear_color(0x4F);   /* red background, white text (attr 0x4F) */
+    console_print("KERNEL PANIC\n\n");
+    if (message && message[0]) {
+        console_print(message);
+        console_print("\n\n");
+    }
+    console_print("El sistema se ha detenido. Presiona una tecla para bloquear.");
+    keyboard_read_char();        /* wait for a keypress */
+    halt_cpu();                  /* cli; hlt loop — never returns */
+}
+```
+
+The VGA attribute byte `0x4F` encodes white-on-red (`0x4` = red background, `0xF` = bright white foreground), making the panic screen immediately recognizable. After displaying the message the system waits for one keypress, then calls the assembly `halt_cpu` routine which disables interrupts and halts forever.
+
+<Tip>
+To add a new kernel subsystem, implement an `init()` function and any command handler, then call `init()` from `kmain` before the `shell_run()` call. Register a command keyword in the shell dispatch table so the subsystem can be exercised interactively without rebooting.
+</Tip>
