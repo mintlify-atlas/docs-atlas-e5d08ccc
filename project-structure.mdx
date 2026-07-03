@@ -1,7 +1,7 @@
 ---
-title: "CrisOS v2 Project Layout and File Organization"
+title: "CrisOS v2 Source Layout, Directories, and File Organization"
 sidebarTitle: "Project Structure"
-description: "A guide to the CrisOS v2 directory layout, what each folder contains, and how source files map to kernel subsystems."
+description: "A complete guide to the CrisOS v2 directory tree: what each folder contains, how source files map to kernel subsystems, and where generated artifacts land."
 ---
 
 The CrisOS v2 repository is organized so that each top-level directory has a single, well-defined responsibility: hardware abstraction and kernel logic live in `src/`, driver implementations in `drivers/`, host-side tooling in `tools/`, rootfs content in `rootfs/`, and GRUB bootloader artifacts in `iso/`. Two root-level files — `linker.ld` and `Makefile` — control the memory layout and build system respectively.
@@ -39,11 +39,11 @@ cris-os-v2/
   | File | Role |
   |---|---|
   | `kernel.c` | Entry point `kmain`; orchestrates all subsystem initialization in order and then calls `shell_run`. |
-  | `kstring.c` | Freestanding string utilities (`kstrlen`, `kstreq`, `kstrstr`, `kskip_spaces`, `kitoa`) used throughout the kernel in place of libc. |
+  | `kstring.c` | Freestanding string utilities used throughout the kernel in place of libc: `kstrlen`, `kstrcmp`, `kstrncmp`, `kstrcpy`, `kstrcat`, `kstrstr`, `kstrchr`, `kmemset`, `kmemcpy`, `kmemcmp`, `kitoa`. The header also provides the `static inline` helpers `kstreq` and `kskip_spaces`. |
   | `gdt.c` | Sets up the Global Descriptor Table with kernel code and data segments and loads it via `lgdt`. |
   | `idt.c` | Populates the Interrupt Descriptor Table with ISR stubs for CPU exceptions (0–31) and hardware IRQs (0–15). |
   | `fs.c` | Low-level CRFS image parser: reads the 16-byte header, builds an in-memory file entry table from the CRFS binary blob delivered as a Multiboot module. |
-  | `vfs.c` | Virtual File System layer: maintains the current working directory, resolves paths, and exposes `vfs_list`, `vfs_cat`, `vfs_read`, `vfs_write`, `vfs_mkdir`, `vfs_touch`, `vfs_remove`, `vfs_cp`, `vfs_mv`, and `vfs_exists` to the shell. |
+  | `vfs.c` | Virtual File System layer: maintains the current working directory, resolves paths, and exposes the full public API declared in `vfs.h`: `vfs_init`, `vfs_pwd`, `vfs_cd`, `vfs_list`, `vfs_cat`, `vfs_read`, `vfs_get_size`, `vfs_write`, `vfs_mkdir`, `vfs_touch`, `vfs_remove`, `vfs_rmdir`, `vfs_cp`, `vfs_mv`, and `vfs_exists`. |
   | `shell.c` | Interactive shell loop: reads lines via `keyboard_readline`, tokenizes input, and dispatches to the appropriate subsystem or built-in handler. |
   | `boot.c` | Boot manager (`boot_init`, `boot_handle_command`) — handles `bootctl` shell commands. |
   | `systemd.c` | Service manager (`systemd_init`, `systemd_handle_command`) — handles `systemctl` shell commands. |
@@ -84,13 +84,17 @@ cris-os-v2/
 </Accordion>
 
 <Accordion title="rootfs/ — Root filesystem content">
-  Plain text files that `tools/build_rootfs.py` packs into the CRFS image (`iso/boot/rootfs.bin`). The kernel mounts this image at boot as a Multiboot module and exposes its contents through the VFS at the root path `/`.
+  Files and directories that `tools/build_rootfs.py` packs into the CRFS image (`iso/boot/rootfs.bin`). The kernel mounts this image at boot as a Multiboot module and exposes its contents through the VFS at the root path `/`.
 
-  | File | Content |
+  | Path | Content |
   |---|---|
   | `README.txt` | Welcome message displayed when the user runs `cat README.txt` from the shell. |
   | `info.txt` | One-line OS identification string (`MiniOS v0.1`, basic filesystem status). |
   | `lcp_repo.txt` | Plain-text LCP package listing used by the in-kernel `lcp.c` to resolve package metadata without a JSON parser. Lists `nano-cris`, `editor-lite`, `textpad`, `libc`, and `termcap`. |
+  | `bin/hello.txt` | Sample binary-directory file for filesystem browsing tests. |
+  | `boot/hello.boot` | Sample boot-directory file used by the boot manager subsystem. |
+  | `share/nano-cris/help.txt` | Help text for the `nano-cris` package, accessible from the VFS. |
+  | `systemd/hello.service` | Sample service unit file read by the service manager (`systemd.c`). |
 </Accordion>
 
 <Accordion title="iso/ — GRUB bootloader tree">

@@ -1,5 +1,5 @@
 ---
-title: "LCP Package Manager Command Reference"
+title: "LCP Package Manager Commands Reference for CrisOS v2"
 sidebarTitle: "LCP Commands"
 description: "Complete reference for the lcp CLI tool: all commands, flags, exit codes, and repository management for CrisOS v2's Lightweight CrisOS Packager."
 ---
@@ -534,6 +534,9 @@ The in-kernel LCP (`src/lcp.c`) is a fully separate C implementation that runs i
 | Repo source | HTTP/HTTPS or `file://` | VFS path `lcp_repo.txt`; falls back to compiled-in defaults |
 | Persistence | `~/.lcp/installed.json` on host | In-memory `lcp_package_t` array; state is lost on reboot |
 | Supported subcommands | Full set (see above) | `help`, `search`, `info`, `list`, `install`, `remove`, `update`, `upgrade`, `files`, `depends`, `verify` |
+| `list` flags | `--installed`, `--available`, `--upgradable` | `--installed`, `--available` only (`--upgradable` is not dispatched) |
+| `install` flags | `--force`, `--no-deps`, `--root <path>` | `--no-deps` only (`--force` and `--root` are not supported) |
+| `remove` flags | `--purge` | `--purge` |
 | `--root` option | Supported | Not applicable |
 | Dependency resolution | Full topological sort | Recursive install of known packages; no version comparison |
 | Exit codes | Detailed (0–9) | Always returns `0`; errors printed to console |

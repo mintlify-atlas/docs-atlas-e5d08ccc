@@ -29,7 +29,7 @@ Both structs are packed (`#pragma pack(push, 1)`), so there is no implicit paddi
 
 ### Binary Layout
 
-```
+```text
 Offset 0
 ┌─────────────────────────────────┐
 │ fs_header  (16 bytes)           │  magic[4] + version + file_count + reserved
@@ -78,7 +78,7 @@ size_t                fs_file_count(void);
 ### Initialization — `fs_init()`
 
 ```c
-bool fs_init(const void *image, size_t size)
+int fs_init(const void *image, size_t size)
 ```
 
 1. Checks `image != NULL` and `size >= sizeof(fs_header_t)`.

@@ -1,7 +1,7 @@
 ---
-title: "CrisOS v2 Memory Layout and Bump Allocator"
+title: "CrisOS v2 Memory: Load Address, Stack, and Bump Allocator"
 sidebarTitle: "Memory"
-description: "How CrisOS v2 manages memory: kernel load address, stack layout, 64 KB bump heap allocator, and VFS data store."
+description: "Physical memory layout of CrisOS v2: 1 MB kernel load address, 8 KB static stack, 64 KB bump-allocator heap, and 16 KB VFS data store."
 ---
 
 CrisOS v2 uses a simple, deterministic memory model suited to its educational 32-bit i386 environment. There is no virtual memory, no paging, and no free list — just a bump allocator backed by a fixed static array. Every allocation advances a single offset pointer and nothing is ever reclaimed. This design makes memory behavior fully predictable and easy to reason about, at the cost of a hard upper bound on total dynamic allocation.
@@ -87,7 +87,7 @@ The Virtual File System layer (`src/vfs.c`) maintains a separate 16 KB flat buff
 #define VFS_DATA_STORE_SIZE 16384
 
 static char data_store[VFS_DATA_STORE_SIZE];
-static size_t data_used = 0;
+static size_t data_used;
 ```
 
 New file content is appended to `data_store` by advancing `data_used`. Like `kmalloc`, allocations from the data store are permanent — there is no mechanism to reclaim space once content has been written.

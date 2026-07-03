@@ -1,7 +1,7 @@
 ---
-title: "LCP Package Manager: Host CLI and In-Kernel Package System"
+title: "LCP Package Manager: Host CLI and In-Kernel System"
 sidebarTitle: "LCP Package Manager"
-description: "LCP is CrisOS v2's dual-mode package manager. Use the Python host CLI to manage packages on your development machine or the in-kernel lcp command inside the OS."
+description: "LCP is CrisOS v2's dual-mode package manager: a Python 3 host CLI for development and an in-kernel C implementation accessible as the lcp shell command."
 ---
 
 LCP (Lightweight CrisOS Packager) ships in two forms: a Python 3 CLI (`tools/lcp.py`) for host-side package management during development, and an in-kernel C implementation (`src/lcp.c`) accessible via the `lcp` shell command at runtime. Both modes share the same package metadata format and the same five packages in the default `main` repository, so workflows familiar from one mode translate directly to the other.
@@ -257,7 +257,7 @@ Prints the direct dependency list for a package, whether or not it is currently 
 python tools/lcp.py verify nano-cris
 ```
 
-Walks the file list recorded at install time and reports any files that are missing from disk. Exits with code `5` if any files are missing.
+Walks the file list recorded at install time and reports any files that are missing from disk. Exits with code `5` (`EXIT_INSTALL_FAIL`) if any files are missing.
 
 </Accordion>
 
@@ -330,7 +330,7 @@ DEFAULT_REPOS = [
 | `2` | `EXIT_INVALID_COMMAND` | Unknown or malformed command |
 | `3` | `EXIT_NOT_FOUND` | Package not found in any repository or installed database |
 | `4` | `EXIT_DEP_MISSING` | One or more dependencies could not be resolved |
-| `5` | `EXIT_INSTALL_FAIL` | File creation or write failed during install |
+| `5` | `EXIT_INSTALL_FAIL` | Install write failed, remove blocked by dependents, or verify found missing files |
 | `6` | `EXIT_PERMISSIONS` | Insufficient filesystem permissions |
 | `7` | `EXIT_REPO_DOWN` | Repository fetch failed (network or file not found) |
 | `8` | `EXIT_ALREADY_INSTALLED` | Package is already installed (use `--force` to override) |
@@ -340,7 +340,7 @@ DEFAULT_REPOS = [
 
 ## In-kernel `lcp` command
 
-Inside a running CrisOS v2 shell, the `lcp` command is dispatched to `lcp_handle_command()` in `src/lcp.c`. The in-kernel implementation supports a subset of the host CLI's commands:
+Inside a running CrisOS v2 shell, the `lcp` command is dispatched to `lcp_handle_command()` in `src/lcp.c`. The in-kernel implementation exposes the following subcommands, as dispatched in `lcp_handle_command()`:
 
 | Command | Description |
 |---|---|

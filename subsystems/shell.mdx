@@ -1,7 +1,7 @@
 ---
-title: "CrisOS v2 Interactive Shell: Architecture and Command Dispatch"
+title: "CrisOS v2 Shell: Architecture and Command Dispatch"
 sidebarTitle: "Shell"
-description: "How the CrisOS v2 shell loop reads input, tokenizes commands, dispatches to subsystems, and supports output redirection via echo."
+description: "How the CrisOS v2 shell loop reads input, tokenizes commands, dispatches to kernel subsystems, and supports output redirection via echo."
 ---
 
 `shell_run()` is the top-level REPL that runs after all kernel subsystems have been initialized. It prints a `> ` prompt, reads a line from the PS/2 keyboard via `keyboard_readline()`, tokenizes the result into up to three discrete tokens plus a trailing "rest" buffer, and dispatches to the appropriate handler — either a built-in file operation, a system call, or a delegated subsystem command. The shell never returns; it loops indefinitely on an unconditional `while (1)`.
@@ -133,7 +133,7 @@ static void shell_echo(const char *args)
 
 It scans the argument string for a single `>` character (not `>>`). Everything before `>` is treated as the text value; everything after it (trimmed) is the VFS destination path.
 
-```
+```text
 echo Hello, world!          → prints "Hello, world!\n" to console
 echo Hello, world! > /greet → calls vfs_write("/greet", "Hello, world!", 13)
 ```
@@ -165,7 +165,7 @@ static void handle_asm_command(const char *args)
 `parse_int()` handles negative numbers (leading `-`). The four `*_asm()` functions are implemented in inline assembly in `src/asm.h`/`asm.c`.
 
 Example:
-```
+```text
 > asm mul 6 7
 = 42
 ```
@@ -182,7 +182,7 @@ The `kblayout` command calls `keyboard_get_layout()` / `keyboard_set_layout()` a
 | `KB_LAYOUT_ES` (`1`) | `es (Spanish)` | QWERTY ES |
 | `KB_LAYOUT_DE` (`2`) | `de (German)` | QWERTZ DE |
 
-```
+```text
 > kblayout
 Current layout: us (English)
 Usage: kblayout us|es|de

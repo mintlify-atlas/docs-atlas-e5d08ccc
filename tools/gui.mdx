@@ -1,5 +1,5 @@
 ---
-title: "CrisOS v2 GUI, Calculator, and Boot Manager"
+title: "CrisOS v2 GUI Overlay, Calculator, and Boot Manager"
 sidebarTitle: "GUI & Extras"
 description: "CrisOS v2 includes a VGA text-mode GUI overlay, an arithmetic expression calculator, and a boot manager — all accessible as shell commands."
 ---
@@ -25,32 +25,31 @@ For example, `0x1F` is bright white text on a blue background — the default co
 
 ### Drawing functions
 
-All rendering goes through three low-level helpers (implemented in `src/asm_utils.S` via `console_putxy`):
+All rendering in `gui_show()` goes through three internal static helper functions and one low-level primitive (`console_putxy`). These helpers are defined in `src/gui.c` and are not exported:
 
 | Function | Signature | Description |
 |---|---|---|
 | `gui_draw_box` | `gui_draw_box(int x, int y, int w, int h, unsigned char attr)` | Fills a rectangle with spaces using the given attribute — effectively a colored background block |
 | `gui_draw_frame` | `gui_draw_frame(int x, int y, int w, int h, unsigned char attr)` | Draws a double-line border using CP437 box characters (`0xCD` horizontal, `0xBA` vertical, `0xC9`/`0xBB`/`0xC8`/`0xBC` corners) |
 | `gui_draw_text` | `gui_draw_text(int x, int y, const char *text, unsigned char attr)` | Writes a string left-to-right starting at column `x`, row `y` |
-| `gui_show` | `gui_show(void)` | Draws the full GUI window and enters the interactive key-dispatch loop |
 
-The main window is positioned at `x=5, y=3` with `w=70, h=18`, giving a comfortable 68-column × 16-row interior working area.
+The only exported public function is `gui_show()`, declared in `src/gui.h`. The main window is positioned at `x=5, y=3` with `w=70, h=18`, giving a comfortable 68-column × 16-row interior working area.
 
 ### Menu options
 
-After drawing the window, `gui_show()` renders three rows of menu labels and enters a blocking `keyboard_read_char()` loop. Each keypress dispatches to a sub-screen or shell action:
+After drawing the window, `gui_show()` renders three rows of menu labels and enters a blocking `keyboard_read_char()` loop. Each keypress dispatches to a sub-screen or action as implemented in the `switch` statement in `gui_show()`:
 
 | Key | Action |
 |---|---|
-| `S` | Exit the GUI and return to the shell prompt |
+| `S` | Clear the screen and return to the shell prompt |
 | `F` | Filesystem view — shows the current VFS path (`vfs_pwd()`) and lists directory contents via `vfs_list(".")` |
 | `M` | System status screen — displays kernel mode, command style, VFS type, and service manager status |
-| `C` | Redirects to shell: `mkdir <path>` creates directories |
-| `T` | Redirects to shell: `touch <path>` creates files |
-| `D` | Redirects to shell: `rm <path>` deletes files |
-| `R` | Redirects to shell: `cat <file>` reads file contents |
-| `G` | Redirects to shell: `grep <pattern> <file>` searches files |
-| `U` | Unmount notice — instructs the user to use `cd /` or reboot |
+| `C` | Prints a message directing the user to run `mkdir <path>` from the shell |
+| `T` | Prints a message directing the user to run `touch <path>` from the shell |
+| `D` | Prints a message directing the user to run `rm <path>` from the shell |
+| `R` | Prints a message directing the user to run `cat <file>` from the shell |
+| `G` | Prints a message directing the user to run `grep <pattern> <file>` from the shell |
+| `U` | Prints a notice that unmount is unavailable; instructs the user to use `cd /` or reboot |
 | `Q` | Clears the screen and exits the GUI |
 
 ### System status screen
@@ -113,10 +112,6 @@ Result: 15
 ```
 
 The `calc_app()` wrapper prints `Usage: calc <expression>` if no expression is given, then calls `calc_eval()` and prints `Result: <value>` via `console_print`.
-
-<Note>
-  The CrisOS shell preprocesses command-line input and replaces `=` characters with `+` before dispatching. Write expressions using `+` for addition directly. Do not use `=` as an operator in calc expressions.
-</Note>
 
 ---
 

@@ -1,5 +1,5 @@
 ---
-title: "CrisOS v2 GDT, IDT, and PIC: Protected Mode Interrupt Handling"
+title: "CrisOS v2 Interrupts: GDT, IDT, PIC, and Timer Setup"
 sidebarTitle: "Interrupts"
 description: "How CrisOS v2 sets up the GDT for protected mode, the IDT for interrupt vectors, and remaps the 8259 PIC to handle IRQ1 (keyboard) and IRQ12 (mouse)."
 ---
@@ -76,7 +76,7 @@ void idt_init(void);
 
 ### Implementation
 
-`idt_init()` registers handlers for all 256 interrupt vectors — 32 CPU exception handlers (`isr0`–`isr31`) and 16 hardware IRQ handlers (`irq0`–`irq15`) — using the code segment selector `0x08` and interrupt-gate flags `0x8E`:
+`idt_init()` registers 32 CPU exception handlers (`isr0`–`isr31`) and 16 hardware IRQ handlers (`irq0`–`irq15`) into the 256-entry IDT table, using code segment selector `0x08` and interrupt-gate flags `0x8E`:
 
 ```c
 void idt_init(void)

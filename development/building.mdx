@@ -1,7 +1,7 @@
 ---
-title: "Building CrisOS v2 from Source"
+title: "Building CrisOS v2: Compile and Generate a Boot ISO"
 sidebarTitle: "Building"
-description: "Step-by-step guide to compiling the CrisOS v2 kernel and generating a bootable GRUB ISO image from source using make."
+description: "Compile the CrisOS v2 i386 kernel from source, stage the rootfs image, and produce a bootable GRUB ISO using the Makefile build system."
 ---
 
 CrisOS v2 uses a straightforward Makefile-based build system. All C source files are compiled with `-ffreestanding -m32 -nostdlib`, linked with a custom linker script (`linker.ld`), and packaged into a bootable GRUB ISO using `grub-mkrescue`. The entire process — from a clean checkout to a running VM — is handled by a handful of `make` targets.

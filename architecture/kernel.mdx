@@ -1,7 +1,7 @@
 ---
 title: "CrisOS v2 Kernel: Initialization Sequence and Module Startup"
 sidebarTitle: "Kernel"
-description: "How kmain initializes CrisOS v2: console, GDT, IDT, PIC, timer, keyboard, mouse, VFS, service manager, LCP, and the shell."
+description: "How kmain initializes CrisOS v2 subsystems in order: GDT, IDT, PIC, timer, keyboard, mouse, rootfs, VFS, service manager, and shell."
 ---
 
 `kmain` is the C entry point of CrisOS v2. It is called by the boot assembly stub in `boot/boot.S` with a single argument — the physical address of the Multiboot information structure populated by GRUB — and orchestrates the initialization of every kernel subsystem in a deterministic, sequential order. Control never returns from `kmain`; it ends with an infinite call to `shell_run()`, and the fallback `hlt` loop below it is never reached under normal operation.

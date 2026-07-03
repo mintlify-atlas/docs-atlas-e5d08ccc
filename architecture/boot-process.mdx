@@ -1,7 +1,7 @@
 ---
-title: "CrisOS v2 Boot Process: Multiboot to Kernel Entry"
+title: "CrisOS v2 Boot Process: GRUB Multiboot and Kernel Entry"
 sidebarTitle: "Boot Process"
-description: "How CrisOS v2 boots via GRUB Multiboot: assembly entry point, stack setup, protected mode entry, and the handoff to kmain."
+description: "How CrisOS v2 boots via GRUB Multiboot: the assembly entry point, 8 KB stack setup, protected-mode segment clearing, and handoff to kmain."
 ---
 
 GRUB loads the CrisOS v2 kernel ELF at physical address `0x00100000` (the 1 MB mark), validates the embedded Multiboot header, and transfers control to the `start` symbol defined in `boot/boot.S`. From that moment the CPU is already in 32-bit protected mode, and the assembly entry point is responsible for establishing a clean execution environment before calling the C kernel entry point `kmain`.

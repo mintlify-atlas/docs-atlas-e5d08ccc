@@ -1,7 +1,7 @@
 ---
-title: "Running CrisOS v2 in QEMU"
+title: "Running CrisOS v2 in QEMU: Boot, Shell, and Debugging"
 sidebarTitle: "QEMU"
-description: "How to boot and interact with CrisOS v2 in QEMU, including the boot sequence, shell interaction, and debugging tips."
+description: "Boot the CrisOS v2 i386 kernel in QEMU using make run, observe the full boot sequence output, interact with the shell, and apply debug flags."
 ---
 
 QEMU is the primary way to run and test CrisOS v2. The `make run` target builds a bootable ISO and launches `qemu-system-i386` with 512 MB of RAM. GRUB reads `iso/boot/grub/grub.cfg`, loads `kernel.bin` via Multiboot, and passes `rootfs.bin` as a module. The boot sequence completes in under a second and drops you into the CrisOS interactive shell.

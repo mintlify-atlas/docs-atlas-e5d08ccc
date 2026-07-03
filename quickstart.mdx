@@ -1,7 +1,7 @@
 ---
-title: "Get Started with CrisOS v2"
+title: "Build and Run CrisOS v2 from Source in Five Minutes"
 sidebarTitle: "Quickstart"
-description: "Build the CrisOS v2 kernel, generate a bootable ISO with GRUB, and run it in QEMU in under five minutes."
+description: "Clone the repo, compile the freestanding i386 kernel, pack the CRFS rootfs, create a bootable GRUB ISO, and launch CrisOS v2 in QEMU from a fresh checkout."
 ---
 
 This guide walks you through cloning the CrisOS v2 repository, compiling the freestanding i386 kernel, packing the CRFS rootfs image, generating a bootable ISO with GRUB, and launching the system inside QEMU — from a fresh checkout to an interactive shell prompt in about five minutes.
@@ -116,6 +116,10 @@ Before you start, make sure the following tools are available on your host machi
 
     >
     ```
+
+    <Note>
+      GDT and IDT are initialized silently before the PIC. No console output is produced for those two steps — they are confirmed working only if the system continues past the PIC initialization line without a fault.
+    </Note>
   </Step>
 
   <Step title="Use the shell">
@@ -135,6 +139,10 @@ Before you start, make sure the following tools are available on your host machi
     README.txt
     info.txt
     lcp_repo.txt
+    bin
+    boot
+    share
+    systemd
 
     > cat README.txt
     Bienvenido a MiniOS.
@@ -166,7 +174,7 @@ Before you start, make sure the following tools are available on your host machi
 | Target | What it does |
 |---|---|
 | `make` | Compiles all C and Assembly sources and links `build/kernel.bin`. |
-| `make iso` | Builds the kernel and packs `iso/boot/rootfs.bin` from `rootfs/`. |
+| `make iso` | Builds the kernel, packs `iso/boot/rootfs.bin` from `rootfs/`, and copies `build/kernel.bin` to `iso/boot/kernel.bin`. |
 | `make echo-iso` | Runs `make iso`, then calls `grub-mkrescue` to produce `os.iso`. |
 | `make run` | Runs `make echo-iso`, then launches `qemu-system-i386 -cdrom os.iso -m 512M`. |
 | `make clean` | Removes `build/`, `os.iso`, `iso/boot/kernel.bin`, and `iso/boot/rootfs.bin`. |

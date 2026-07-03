@@ -1,7 +1,7 @@
 ---
-title: "VFS and FS API Reference for CrisOS v2"
+title: "CrisOS v2 VFS and CRFS Filesystem Function Reference"
 sidebarTitle: "VFS API"
-description: "C function reference for the CrisOS v2 virtual file system (vfs.h) and raw CRFS filesystem layer (fs.h), including signatures, parameters, and return values."
+description: "C function reference for CrisOS v2 vfs.h and fs.h: VFS node tree, CRFS image parsing, path resolution, and file and directory I/O signatures."
 ---
 
 The CrisOS v2 file system API spans two layers. The `fs.h` layer provides raw access to the CRFS binary image — it parses the on-disk format and exposes a flat table of named files. The `vfs.h` layer wraps `fs.h` with a navigable in-memory node tree that supports the full file and directory interface used by the shell, including path resolution, writable files, and dynamic directory creation.
